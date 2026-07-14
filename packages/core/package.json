@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail-core",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Browser SDK for capturing Crumbtrail sessions and sending evidence to a local Crumbtrail server.",
   "license": "MIT",
   "repository": {

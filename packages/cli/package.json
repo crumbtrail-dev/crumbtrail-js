@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Crumbtrail setup CLI — detect your framework and wire the SDK into your app in one step.",
   "license": "MIT",
   "repository": {

@@ -210,3 +210,15 @@ setup (skip with `--skip-verify`).
 
 - React Native >=0.72 (bare or Expo, managed or bare workflow)
 - React >=18
+
+## Links
+
+- **Website** — https://crumbtrail.dev
+- **Docs** — https://crumbtrail.dev/docs
+- **How it works** — https://crumbtrail.dev/how-it-works
+- **Source** — https://github.com/crumbtrail-dev/crumbtrail-js
+- **Issues** — https://github.com/crumbtrail-dev/crumbtrail-js/issues
+
+## License
+
+MIT

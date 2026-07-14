@@ -2,7 +2,21 @@
 
 Local Crumbtrail HTTP server, MCP server, Express middleware, and package CLI.
 
-This package is the local self-host runtime boundary for Crumbtrail. It owns the server process that receives session events, writes local artifacts, post-processes sessions, and exposes MCP-readable evidence.
+This package is the local self-host runtime boundary for [Crumbtrail](https://crumbtrail.dev). It owns the server process that receives session events, writes local artifacts, post-processes sessions, and exposes MCP-readable evidence.
+
+## Install
+
+```bash
+npm install crumbtrail-node
+```
+
+Or let the setup wizard install and wire everything for you:
+
+```bash
+npx crumbtrail
+```
+
+Pair it with [`crumbtrail-core`](https://www.npmjs.com/package/crumbtrail-core) in the browser. If you'd rather not run a server at all, the hosted cloud at [crumbtrail.dev](https://crumbtrail.dev) is a drop-in replacement for this endpoint.
 
 ## Runtime boundary
 
@@ -240,3 +254,15 @@ The `src/__tests__/package-boundary.test.ts` suite locks the package metadata, b
 ## What this does not claim yet
 
 This package is not yet a production/cloud hosting story. M003 proves local self-host packaging and fresh-install validation; later work can still expand deployment guides and hosted operations.
+
+## Links
+
+- **Website** — https://crumbtrail.dev
+- **Docs** — https://crumbtrail.dev/docs
+- **How it works** — https://crumbtrail.dev/how-it-works
+- **Source** — https://github.com/crumbtrail-dev/crumbtrail-js
+- **Issues** — https://github.com/crumbtrail-dev/crumbtrail-js/issues
+
+## License
+
+MIT

@@ -38,8 +38,11 @@ npm install crumbtrail-core
 ```ts
 import { Crumbtrail, PRESET_PASSIVE } from "crumbtrail-core";
 
-const crumbtrail = new Crumbtrail(PRESET_PASSIVE);
-crumbtrail.start();
+Crumbtrail.init({
+  ...PRESET_PASSIVE,
+  httpEndpoint: "https://api.crumbtrail.dev",
+  httpAuthToken: process.env.CRUMBTRAIL_KEY,
+});
 ```
 
 ## Examples

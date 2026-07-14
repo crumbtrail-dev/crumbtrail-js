@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail-node",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local Crumbtrail server, MCP evidence tools, Express middleware, and CLI for self-hosted debugging sessions.",
   "license": "MIT",
   "repository": {
