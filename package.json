@@ -12,7 +12,12 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r --if-present run typecheck",
     "lint": "eslint .",
-    "clean": "pnpm -r clean"
+    "clean": "pnpm -r clean",
+    "pack:local": "node scripts/pack-local.mjs",
+    "verify:installers": "node scripts/verify-installers.mjs",
+    "verify:fresh-install": "node scripts/verify-fresh-install.mjs",
+    "verify:integration-docs": "pnpm --filter crumbtrail-node build && node scripts/verify-integration-docs.mjs",
+    "refresh:installer-fixtures": "node scripts/refresh-installer-fixtures.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

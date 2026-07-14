@@ -1,0 +1,14 @@
+{
+  "name": "installer-fixture-express-esm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal Express (ESM) app used by the installer regression harness.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

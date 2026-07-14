@@ -1,0 +1,22 @@
+{
+  "name": "installer-fixture-next-legacy-pages",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Realistic legacy (<15.3) Next.js Pages Router app for the installer regression harness.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.2.33",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5"
+  }
+}

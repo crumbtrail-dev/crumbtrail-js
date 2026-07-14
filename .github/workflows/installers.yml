@@ -1,0 +1,69 @@
+name: installers
+
+# Installer regression harness (scripts/verify-installers.mjs). Path-filtered so
+# it only runs when the wizard, cloud, SDK, install-shared, the harness itself,
+# or an installer fixture changes. Setup mirrors ci.yml (pnpm 10 + Node 22).
+
+on:
+  pull_request:
+    paths:
+      - "packages/cli/**"
+      - "packages/node/**"
+      - "packages/core/**"
+      - "packages/install-shared/**"
+      - "scripts/verify-installers.mjs"
+      - "scripts/lib/**"
+      - "test-fixtures/installers/**"
+      - ".github/workflows/installers.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/cli/**"
+      - "packages/node/**"
+      - "packages/core/**"
+      - "packages/install-shared/**"
+      - "scripts/verify-installers.mjs"
+      - "scripts/lib/**"
+      - "test-fixtures/installers/**"
+      - ".github/workflows/installers.yml"
+  # Weekly drift sweep: re-scaffold every real-generator fixture and re-run the
+  # full matrix, so upstream scaffolder changes surface on a schedule instead of
+  # silently rotting the fixtures. Mondays 07:00 UTC.
+  schedule:
+    - cron: "0 7 * * 1"
+
+jobs:
+  installers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:installers
+
+  # Scheduled-only drift detector. Re-runs the committed fixtures' generators and
+  # diffs; a drift (or a failed regenerate) fails the job visibly so a human can
+  # refresh the fixture. Kept separate from the PR-path `installers` job (which is
+  # untouched) so drift never blocks an unrelated PR.
+  fixture-drift:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Drift (exit 1) fails the scheduled run → GitHub surfaces the failed cron.
+      - run: node scripts/refresh-installer-fixtures.mjs
+      - run: pnpm verify:installers

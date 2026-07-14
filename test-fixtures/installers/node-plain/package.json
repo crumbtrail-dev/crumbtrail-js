@@ -1,0 +1,10 @@
+{
+  "name": "installer-fixture-node-plain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal plain-Node http server used by the installer regression harness.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

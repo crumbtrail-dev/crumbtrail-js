@@ -1,0 +1,13 @@
+{
+  "name": "installer-fixture-fastify",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal Fastify (CommonJS) app used by the installer regression harness.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1"
+  }
+}

@@ -1,0 +1,6 @@
+# Minimal FastAPI backend used by the installer regression harness as an OTLP
+# guidance fixture. The harness never runs Python — these markers only need to
+# exist so the wizard's detect() resolves the `otlp` recipe with a `fastapi`
+# stack (packages/cli/src/detect.ts resolveOtlpStack reads this file as text).
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
