@@ -82,6 +82,9 @@ export async function startStubCloud(opts) {
   const sessions = [];
   let mintedToken = seededToken ?? "bl_cli_" + "s".repeat(48);
   let devicePolls = 0;
+  /** GET /api/sessions count; read #0 is the poll's baseline snapshot. */
+  let sessionsReads = 0;
+  let autoRealMinted = false;
 
   const installManifest = () => {
     if (!tarballsDir) return undefined;
@@ -105,23 +108,6 @@ export async function startStubCloud(opts) {
     const rawBody =
       req.method === "POST" || req.method === "PUT" ? await readBody(req) : "";
 
-    // ── ingest surface (recorder) ──────────────────────────────────────────
-    // When enabled, the first synthetic event batch stands in for the wired app
-    // producing its first REAL session AFTER the wizard started — so the
-    // wizardStart poll filter (verify.ts) has a post-start row to accept.
-    if (
-      opts.autoRealSession &&
-      req.method === "POST" &&
-      urlPath === "/api/events"
-    ) {
-      sessions.push({
-        id: `ses_stub_real_${Date.now()}`,
-        startedAt: new Date().toISOString(),
-        serviceId: null,
-        serviceName: null,
-        finalizedAt: null,
-      });
-    }
     if (ingest.handle(req, res, urlPath, rawBody)) return;
 
     // ── token probe + list ─────────────────────────────────────────────────
@@ -175,6 +161,23 @@ export async function startStubCloud(opts) {
 
     // ── real-event poll ─────────────────────────────────────────────────────
     if (req.method === "GET" && urlPath === "/api/sessions") {
+      // `autoRealSession` stands in for the user booting their wired app WHILE
+      // the wizard waits. It must therefore appear only AFTER pollForRealEvent
+      // has taken its baseline snapshot — the poll's first read (verify.ts).
+      // Any session already present in that baseline is, by definition, not new,
+      // so minting earlier (e.g. off the wizard's own synthetic cli-check POST)
+      // buries the row in the baseline and the poll can never surface it.
+      if (opts.autoRealSession && sessionsReads > 0 && !autoRealMinted) {
+        autoRealMinted = true;
+        sessions.push({
+          id: `ses_stub_real_${Date.now()}`,
+          startedAt: new Date().toISOString(),
+          serviceId: null,
+          serviceName: null,
+          finalizedAt: null,
+        });
+      }
+      sessionsReads += 1;
       const rows = [...sessions].sort((a, b) =>
         a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0,
       );
