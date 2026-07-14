@@ -147,7 +147,9 @@ function makeDeps(h: HarnessOpts, over: Partial<WizardDeps> = {}): WizardDeps {
     openBrowserFn: vi.fn(async () => true),
     ui,
     prompter: noopPrompter,
-    env: { CRUMBTRAIL_BASE_URL: "http://127.0.0.1:9999" },
+    // DISPLAY pinned so canUseBrowser's headless-Linux guard doesn't make
+    // browser-open assertions platform-dependent (CI runners have no X).
+    env: { CRUMBTRAIL_BASE_URL: "http://127.0.0.1:9999", DISPLAY: ":0" },
     cwd: "/app",
     isTTY: h.isTTY ?? true,
     fetchImpl: undefined,
