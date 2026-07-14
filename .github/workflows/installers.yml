@@ -45,6 +45,8 @@ jobs:
           node-version: "22"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # browser-load.mjs proves frontend recipes in a real chromium page.
+      - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm verify:installers
 
   # Scheduled-only drift detector. Re-runs the committed fixtures' generators and
@@ -64,6 +66,7 @@ jobs:
           node-version: "22"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
       # Drift (exit 1) fails the scheduled run → GitHub surfaces the failed cron.
       - run: node scripts/refresh-installer-fixtures.mjs
       - run: pnpm verify:installers
