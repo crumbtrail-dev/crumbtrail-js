@@ -22,3 +22,16 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+
+      # Dogfood the pre-deploy gate mechanism: the locally-built CLI must exit
+      # NON-zero when the config is broken, which is what makes `.github/actions/verify`
+      # fail a consumer's job. Hermetic — `.invalid` is RFC 6761-reserved and never
+      # resolves, so DNS fails offline with no network dependency.
+      - name: Verify gate fails on broken config
+        run: |
+          if node packages/cli/dist/cli.cjs verify \
+            --endpoint https://this-host-does-not-exist.invalid --key x --json; then
+            echo "::error::verify unexpectedly succeeded against a bogus endpoint — the CI gate is broken"
+            exit 1
+          fi
+          echo "verify correctly exited non-zero on a broken config"

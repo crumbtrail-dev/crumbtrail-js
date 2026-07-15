@@ -1,0 +1,70 @@
+# Reusable pre-deploy CI gate for Crumbtrail ingest config.
+#
+# Drop this into a consumer repo's deploy pipeline (e.g. Alertbase) to FAIL the
+# job BEFORE it ships if the target environment's Crumbtrail ingest config is
+# broken — a wrong key, wrong endpoint, or a TLS cert/host mismatch that would
+# otherwise leave the deployed app silently sending nothing. This is the
+# "confirm prod works from CI, don't deploy-and-pray" gate.
+#
+# It is a thin, SHARED wrapper around the published `crumbtrail` CLI's `verify`
+# preflight (DNS → TLS → auth). `npx crumbtrail@<version>` is the correct
+# consumer entry point because the CLI is published from THIS repo
+# (packages/cli, `bin: crumbtrail`). The preflight exits non-zero on any FAIL,
+# so a broken config fails this step and thus the whole job.
+#
+# NOTE: the version currently on this branch is bumped to 0.5.0 but is NOT yet
+# released to npm. Wiring this action into a consumer's deploy workflow depends
+# on `crumbtrail@0.5.0` being published first — see the action README.
+
+name: "Crumbtrail verify"
+description: "Pre-deploy gate: preflight a Crumbtrail endpoint + ingest key (DNS, TLS, auth). Fails the job on a broken config."
+
+inputs:
+  endpoint:
+    description: "Cloud endpoint to probe."
+    required: false
+    default: "https://api.crumbtrail.ai"
+  key:
+    description: "Ingest key to probe with. MUST come from a CI secret — never inline it."
+    required: true
+  project:
+    description: "Optional project id (used for the authenticated fallback probe)."
+    required: false
+    default: ""
+  version:
+    description: "Which published `crumbtrail` version to run via npx."
+    required: false
+    default: "latest"
+  node-version:
+    description: "Node.js version used to run the CLI."
+    required: false
+    default: "22"
+
+runs:
+  using: "composite"
+  steps:
+    # The CLI needs Node >=22.15. Provision it here so the action is
+    # self-contained and callers don't have to remember to add setup-node.
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Run the published CLI's preflight. Key + project are passed via env, NOT
+    # interpolated into the shell line, so the key is never rendered into the
+    # command that CI logs. The CLI does not echo the key either. `set -eu`
+    # plus the CLI's non-zero exit on any FAIL is what fails the job.
+    - name: Crumbtrail preflight
+      shell: bash
+      env:
+        CRUMBTRAIL_VERIFY_ENDPOINT: ${{ inputs.endpoint }}
+        CRUMBTRAIL_VERIFY_KEY: ${{ inputs.key }}
+        CRUMBTRAIL_VERIFY_PROJECT: ${{ inputs.project }}
+        CRUMBTRAIL_VERIFY_VERSION: ${{ inputs.version }}
+      run: |
+        set -eu
+        args=(verify --endpoint "$CRUMBTRAIL_VERIFY_ENDPOINT" --key "$CRUMBTRAIL_VERIFY_KEY" --json)
+        if [ -n "$CRUMBTRAIL_VERIFY_PROJECT" ]; then
+          args+=(--project "$CRUMBTRAIL_VERIFY_PROJECT")
+        fi
+        npx --yes "crumbtrail@${CRUMBTRAIL_VERIFY_VERSION}" "${args[@]}"

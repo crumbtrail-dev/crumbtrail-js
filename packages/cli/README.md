@@ -96,6 +96,51 @@ crumbtrail verify --endpoint "$CRUMBTRAIL_BASE_URL" --key "$CRUMBTRAIL_KEY" --js
   || { echo "Crumbtrail preflight failed — not deploying"; exit 1; }
 ```
 
+### Pre-deploy CI gate
+
+Run `verify` in your deploy pipeline to **confirm prod ingest works before you
+ship, instead of deploy-and-pray**. Because a broken config (wrong key, wrong
+endpoint, TLS cert/host mismatch) makes the preflight exit non-zero, the step —
+and the whole job — fails, and the deploy never runs.
+
+**GitHub Actions** — use the reusable composite action published from this repo,
+so every consumer references one shared gate instead of forking a snippet:
+
+```yaml
+- name: Verify Crumbtrail config
+  uses: CrumbtrailDev/crumbtrail-cli/.github/actions/verify@main
+  with:
+    endpoint: https://api.crumbtrail.ai
+    key: ${{ secrets.CRUMBTRAIL_INGEST_KEY }}
+    # project: prj_1234abcd    # optional
+    # version: 0.5.0           # pin once released; default is `latest`
+
+- name: Deploy
+  run: ./deploy.sh
+```
+
+If the preflight fails, the verify step fails and `Deploy` never runs. See
+[`.github/actions/verify`](../../.github/actions/verify) for the full input
+reference.
+
+**Any other CI (raw `npx`)** — the composite action is just a wrapper around the
+published CLI, so non-GitHub pipelines get the same gate directly:
+
+```bash
+npx --yes crumbtrail@latest verify \
+  --endpoint https://api.crumbtrail.ai \
+  --key "$CRUMBTRAIL_INGEST_KEY" \
+  --json \
+  || { echo "Crumbtrail preflight failed — not deploying"; exit 1; }
+```
+
+`--json` emits `{ ok, endpoint, stages[] }` for machine parsing; the exit code
+alone is enough to gate the pipeline.
+
+**The key must come from a CI secret, never inline.** Store it as
+`CRUMBTRAIL_INGEST_KEY` (or your secret name of choice) and reference it — the
+CLI and the composite action never echo the key.
+
 ## What it writes
 
 Only one kind of change, in the package it's wiring:
