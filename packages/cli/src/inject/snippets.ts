@@ -1,32 +1,34 @@
-// Pure snippet builders. These produce the exact code Crumbtrail injects, with
-// the live endpoint + key threaded through (no hardcoding). Client stacks use
-// the README's canonical init shape; the Node recipe uses crumbtrail-node's
-// documented headless-session API and reads the key from the environment.
+// Pure snippet builders. These produce the exact code Crumbtrail injects. The
+// key is NEVER inlined: the installer is hands-off, so the emitted code reads the
+// ingest key from a framework-appropriate environment variable (keyExpr, e.g.
+// `import.meta.env.VITE_CRUMBTRAIL_KEY`) and the wizard tells the user to set it
+// from the dashboard. This keeps the live credential out of committed source.
 
 /**
- * Client init block (Next / SvelteKit / Vite). Matches the README exactly:
- *   import { Crumbtrail, PRESET_PASSIVE } from "crumbtrail-core";
- *   Crumbtrail.init({ ...PRESET_PASSIVE, httpEndpoint, httpAuthToken });
- * The ingest key is inlined — it ships in the client bundle anyway (ingest-only,
- * same posture as a Sentry DSN).
+ * Client init block (Next / SvelteKit / Vite / …). Matches the README's init
+ * shape, but reads the key from the environment via `keyExpr` (a code expression
+ * such as `import.meta.env.VITE_CRUMBTRAIL_KEY` or
+ * `process.env.NEXT_PUBLIC_CRUMBTRAIL_KEY`) rather than baking in the literal —
+ * so nothing sensitive lands in version control.
  */
-export function clientInitSnippet(endpoint: string, apiKey: string): string {
+export function clientInitSnippet(endpoint: string, keyExpr: string): string {
   return [
     'import { Crumbtrail, PRESET_PASSIVE } from "crumbtrail-core";',
     "",
     "Crumbtrail.init({",
     "  ...PRESET_PASSIVE,",
     `  httpEndpoint: ${JSON.stringify(endpoint)},`,
-    `  httpAuthToken: ${JSON.stringify(apiKey)},`,
+    `  httpAuthToken: ${keyExpr},`,
     "});",
   ].join("\n");
 }
 
 /**
  * Nuxt client plugin. Wraps the same init in `defineNuxtPlugin` (auto-imported
- * by Nuxt) so it runs client-side on startup.
+ * by Nuxt) so it runs client-side on startup. Reads the key from `keyExpr`
+ * (Nuxt is Vite-based, so `import.meta.env.VITE_CRUMBTRAIL_KEY`).
  */
-export function nuxtPluginSnippet(endpoint: string, apiKey: string): string {
+export function nuxtPluginSnippet(endpoint: string, keyExpr: string): string {
   return [
     'import { Crumbtrail, PRESET_PASSIVE } from "crumbtrail-core";',
     "",
@@ -34,7 +36,7 @@ export function nuxtPluginSnippet(endpoint: string, apiKey: string): string {
     "  Crumbtrail.init({",
     "    ...PRESET_PASSIVE,",
     `    httpEndpoint: ${JSON.stringify(endpoint)},`,
-    `    httpAuthToken: ${JSON.stringify(apiKey)},`,
+    `    httpAuthToken: ${keyExpr},`,
     "  });",
     "});",
   ].join("\n");
@@ -47,16 +49,16 @@ export function nuxtPluginSnippet(endpoint: string, apiKey: string): string {
  * dynamically imported so the block is valid whether the entry file is ESM,
  * CommonJS, or TypeScript, and it is a plain expression (no top-level await) so
  * it is safe to prepend at the very top of an entry file. The ingest key is read
- * from process.env.CRUMBTRAIL_KEY, which autoCapture loads from `.env` (written by
- * the CLI) itself — never inlined server-side. Express apps can additionally add
+ * from process.env.CRUMBTRAIL_KEY, which autoCapture loads from the `.env` the
+ * user sets (never inlined server-side). Express apps can additionally add
  * `createCrumbtrailExpressMiddleware` for per-request capture (see
  * crumbtrail-node's README).
  */
 export function nodeInitSnippet(endpoint: string): string {
   return [
     "// Crumbtrail — auto-captures uncaught exceptions, unhandled rejections, and",
-    "// console.error. Key is read from process.env.CRUMBTRAIL_KEY, which autoCapture",
-    "// loads from your .env (written by the CLI). Express apps can also add",
+    "// console.error. Key is read from process.env.CRUMBTRAIL_KEY — set it in your",
+    "// .env (get your key from the Crumbtrail dashboard). Express apps can also add",
     "// createCrumbtrailExpressMiddleware for per-request capture.",
     'import("crumbtrail-node")',
     `  .then(({ autoCapture }) => autoCapture({ endpoint: ${JSON.stringify(endpoint)} }))`,
@@ -87,8 +89,8 @@ function singleQuoted(value: string): string {
 export function nestInitSnippet(endpoint: string): string {
   return [
     "// Crumbtrail — auto-captures uncaught exceptions, unhandled rejections, and",
-    "// console.error. Key is read from process.env.CRUMBTRAIL_KEY, which autoCapture",
-    "// loads from your .env (written by the CLI). Express apps can also add",
+    "// console.error. Key is read from process.env.CRUMBTRAIL_KEY — set it in your",
+    "// .env (get your key from the Crumbtrail dashboard). Express apps can also add",
     "// createCrumbtrailExpressMiddleware for per-request capture.",
     "import('crumbtrail-node')",
     `  .then(({ autoCapture }) => autoCapture({ endpoint: ${singleQuoted(endpoint)} }))`,
@@ -101,13 +103,13 @@ export function nestInitSnippet(endpoint: string): string {
  * `createReactNativeCrumbtrail` (which runs `Crumbtrail.init` and installs the
  * global ErrorUtils crash handler) — the same posture as the node recipe. We do
  * NOT wrap a `<CrumbtrailReactNativeProvider>`, because the injection engine only
- * prepends a block or creates a file; it cannot transform JSX. The ingest key is
- * inlined — it ships in the app bundle anyway (ingest-only, same posture as a
- * Sentry DSN).
+ * prepends a block or creates a file; it cannot transform JSX. The key is read
+ * from `keyExpr` (Expo exposes `process.env.EXPO_PUBLIC_CRUMBTRAIL_KEY` to the
+ * app bundle) rather than inlined, keeping it out of committed source.
  */
 export function reactNativeInitSnippet(
   endpoint: string,
-  apiKey: string,
+  keyExpr: string,
 ): string {
   return [
     'import { createReactNativeCrumbtrail } from "crumbtrail-react-native";',
@@ -115,7 +117,7 @@ export function reactNativeInitSnippet(
     "createReactNativeCrumbtrail({",
     "  config: {",
     `    httpEndpoint: ${JSON.stringify(endpoint)},`,
-    `    httpAuthToken: ${JSON.stringify(apiKey)},`,
+    `    httpAuthToken: ${keyExpr},`,
     "  },",
     "});",
   ].join("\n");
@@ -134,9 +136,4 @@ export function tauriInitSnippet(): string {
     "",
     "Crumbtrail.init({ ...PRESET_PASSIVE, transportInstance: new TauriTransport() });",
   ].join("\n");
-}
-
-/** The single line the CLI writes into `.env` for the Node recipe. */
-export function envKeyLine(apiKey: string): string {
-  return `CRUMBTRAIL_KEY=${apiKey}`;
 }

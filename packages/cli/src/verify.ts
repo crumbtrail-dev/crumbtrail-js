@@ -1,12 +1,10 @@
-// Verification, two layers (plans/cli-setup-wizard-design.md §4):
-//   1. Immediate synthetic check — push a marker session through REAL ingest with
-//      the minted key (core's wire format), proving key + endpoint + network
-//      before the user starts their app. The reserved `cli-check-` sessionId
-//      prefix makes the cloud short-circuit the write, so it never pollutes reads.
-//   2. Real-event poll — poll GET /api/sessions for a NON-synthetic session,
-//      using poll.ts's ported backoff. Cancellable via AbortSignal (Ctrl-C).
+// Verification (plans/cli-setup-wizard-design.md §4):
+//   Real-event poll — poll GET /api/sessions for a NON-synthetic session, using
+//   poll.ts's ported backoff. Cancellable via AbortSignal (Ctrl-C). The installer
+//   is hands-off (it mints no key), so the earlier synthetic-ingest check is gone:
+//   there is no key to push a marker session with. An event only arrives once the
+//   user sets their key and starts the app, which this poll waits for.
 
-import { randomBytes } from "node:crypto";
 import { requestJson } from "./net";
 import {
   DEFAULT_INGEST_POLL_CONFIG,
@@ -17,12 +15,11 @@ import {
 } from "./poll";
 import { color, type Ui } from "./ui";
 
-/** The reserved prefix the cloud recognizes and refuses to persist. */
+/**
+ * The reserved prefix the cloud recognizes and refuses to persist. Retained so
+ * the poll still filters out any stray `cli-check-` sessions from earlier runs.
+ */
 export const CLI_CHECK_PREFIX = "cli-check-";
-
-export function syntheticSessionId(): string {
-  return `${CLI_CHECK_PREFIX}${randomBytes(8).toString("hex")}`;
-}
 
 export interface SessionRow {
   id: string;
@@ -109,44 +106,6 @@ export function hasRealSession(
   guard?: RealSessionGuard,
 ): boolean {
   return firstRealSession(sessions, wizardStart, guard) !== undefined;
-}
-
-/**
- * Push a synthetic marker session through real ingest (start → one event → end)
- * with the minted key, emulating crumbtrail-core's HttpTransport wire format
- * (X-Crumbtrail-Auth header, {sessionId, events}). Throws if any leg fails —
- * that proves the key/endpoint/network are wrong before the user wastes time.
- */
-export async function syntheticCheck(
-  base: string,
-  apiKey: string,
-  fetchImpl?: typeof fetch,
-): Promise<void> {
-  const sessionId = syntheticSessionId();
-  const headers = { "X-Crumbtrail-Auth": apiKey };
-  await requestJson(`${base}/api/session/start`, {
-    method: "POST",
-    headers,
-    body: { sessionId, metadata: { source: "cli-check" } },
-    fetchImpl,
-  });
-  await requestJson(`${base}/api/events`, {
-    method: "POST",
-    headers,
-    body: {
-      sessionId,
-      events: [
-        { t: Date.now(), k: "con", d: { level: "log", args: ["cli-check"] } },
-      ],
-    },
-    fetchImpl,
-  });
-  await requestJson(`${base}/api/session/end`, {
-    method: "POST",
-    headers,
-    body: { sessionId },
-    fetchImpl,
-  });
 }
 
 export type RealEventOutcome = "found" | "timedout" | "cancelled";

@@ -66,6 +66,9 @@ function createPlan(): Plan {
     targetPath: "/app/src/main.ts",
     content: "// init",
     warnings: [],
+    // Hands-off: the injected code reads its key from this env var; the wizard
+    // prints the var name + "mint in the dashboard" (it writes no key itself).
+    keyEnvVar: "VITE_CRUMBTRAIL_KEY",
   };
 }
 
@@ -92,7 +95,6 @@ function makeDeps(h: HarnessOpts, over: Partial<WizardDeps> = {}): WizardDeps {
         projectName: "checkout",
         serviceId: "s1",
         serviceName: "web",
-        apiKey: "bl_key_1234567890abcdef",
       };
     }) as unknown as WizardDeps["provisionFlow"],
     installSdk: vi.fn(async () => {
@@ -112,9 +114,6 @@ function makeDeps(h: HarnessOpts, over: Partial<WizardDeps> = {}): WizardDeps {
         message: "Wrote 1 file(s).",
       };
     }) as unknown as WizardDeps["executePlan"],
-    syntheticCheck: vi.fn(async () => {
-      h.steps.push("synthetic");
-    }) as unknown as WizardDeps["syntheticCheck"],
     pollForRealEvent: vi.fn(async () => {
       h.steps.push("poll");
       return { outcome: "found" as const, sessionId: "sess-1" };
@@ -132,7 +131,6 @@ function makeDeps(h: HarnessOpts, over: Partial<WizardDeps> = {}): WizardDeps {
       return {
         serviceId: `svc-${input.serviceName}`,
         serviceName: input.serviceName,
-        apiKey: `bl_key_${input.serviceName}_0987654321`,
       };
     }) as unknown as WizardDeps["provisionService"],
     pollForServices: vi.fn(async (opts: { serviceIds: string[] }) => {
@@ -233,6 +231,7 @@ describe("wizard orchestration", () => {
     // buildPlan runs BEFORE installSdk (it must analyze the pre-install repo so
     // its idempotency check doesn't see the SDK deps installSdk just added and
     // self-cancel injection); executePlan still runs last, after install.
+    // Hands-off: the wizard mints no key, so there is no synthetic-session check.
     expect(steps).toEqual([
       "detect",
       "login",
@@ -240,14 +239,16 @@ describe("wizard orchestration", () => {
       "build",
       "install",
       "execute",
-      "synthetic",
       "poll",
     ]);
     const out = lines.join("\n");
     expect(out).toContain("checkout"); // project
     expect(out).toContain("web"); // service
-    expect(out).toContain("bl_key_1"); // masked key prefix
-    expect(out).not.toContain("1234567890abcdef"); // middle masked
+    // No masked key is printed — instead the wizard names the env var to set and
+    // points the user at the dashboard to mint the value.
+    expect(out).toContain("VITE_CRUMBTRAIL_KEY");
+    expect(out).toContain("/settings");
+    expect(out).not.toMatch(/ctkey_|bgk_|bl_key_/);
     expect(out).toContain("/bugs"); // dashboard link
     expect(out).toContain("/sessions/sess-1"); // deep link to the live session
     expect(out).toContain("/app/src/main.ts"); // injection names the file

@@ -58,18 +58,12 @@ export interface ExecuteResult {
 
 type FileOp =
   | { op: "create"; path: string; content: string }
-  | { op: "prepend"; path: string; block: string }
-  | { op: "env"; path: string; line: string };
+  | { op: "prepend"; path: string; block: string };
 
 interface PreImage {
   path: string;
   existed: boolean;
   content: string | null;
-}
-
-function ensureTrailingNewline(text: string): string {
-  if (text === "") return "";
-  return text.endsWith("\n") ? text : text + "\n";
 }
 
 function applyAllOrNothing(ops: FileOp[], io: ExecutorIO): string[] {
@@ -92,17 +86,6 @@ function applyAllOrNothing(ops: FileOp[], io: ExecutorIO): string[] {
         case "prepend":
           next = prependIntoSource(prior ?? "", op.block);
           break;
-        case "env": {
-          const base = prior ?? "";
-          // Idempotent: never duplicate the key line.
-          if (/^CRUMBTRAIL_KEY=/m.test(base)) {
-            // Skip writing entirely; drop the (unnecessary) pre-image.
-            preimages.pop();
-            continue;
-          }
-          next = ensureTrailingNewline(base) + op.line + "\n";
-          break;
-        }
       }
       io.mkdirp(path.dirname(op.path));
       io.writeFile(op.path, next);
@@ -121,8 +104,8 @@ function applyAllOrNothing(ops: FileOp[], io: ExecutorIO): string[] {
 
 /**
  * Execute a Plan. skip/fallback plans (and unconfirmed dirty plans) perform no
- * writes. create/prepend plans — plus any Node `.env` action — are applied
- * all-or-nothing.
+ * writes. create/prepend plans are applied all-or-nothing. The installer never
+ * writes the ingest key (hands-off), so there is no `.env` write to apply.
  */
 export function executePlan(
   plan: Plan,
@@ -179,13 +162,6 @@ export function executePlan(
       // prepend, or a confirmed needs-confirm-dirty plan
       ops.push({ op: "prepend", path: plan.targetPath, block: plan.content });
     }
-  }
-  if (plan.envAction) {
-    ops.push({
-      op: "env",
-      path: plan.envAction.targetPath,
-      line: plan.envAction.line,
-    });
   }
 
   const written = applyAllOrNothing(ops, io);

@@ -9,16 +9,6 @@ export type PlanKind =
   | "fallback-ai" // detection/safety ambiguous; hand off to the AI-prompt path
   | "otlp-guidance"; // non-JS backend: emit OTLP setup guidance, write nothing
 
-/** A create/append to `.env` carried alongside the Node recipe's plan. */
-export interface EnvAction {
-  /** Absolute path to the `.env` file. */
-  targetPath: string;
-  /** The `CRUMBTRAIL_KEY=...` line to ensure is present. */
-  line: string;
-  /** Set when `.env` is not covered by `.gitignore` (key could get committed). */
-  gitignoreWarning?: string;
-}
-
 /**
  * A fully-resolved, side-effect-free description of what injection would do.
  * The executor turns this into filesystem writes; nothing here performs I/O.
@@ -35,10 +25,15 @@ export interface Plan {
   content: string | null;
   /** Non-fatal notes to surface to the user. */
   warnings: string[];
-  /** fallback-ai: the ready-to-paste code snippet, key already filled in. */
+  /** fallback-ai: the ready-to-paste code snippet (reads the key from env). */
   snippet?: string;
   /** fallback-ai: the `buildAgentPrompt` output for a coding agent. */
   agentPrompt?: string;
-  /** Node recipe: the `.env` write to perform alongside the entry edit. */
-  envAction?: EnvAction;
+  /**
+   * The env var the injected code reads the ingest key from (e.g.
+   * `VITE_CRUMBTRAIL_KEY`). The installer is hands-off — it never writes the key —
+   * so the wizard prints this name and points the user at the dashboard to set
+   * it. Undefined for recipes that inject no key (tauri / otlp / angular).
+   */
+  keyEnvVar?: string;
 }

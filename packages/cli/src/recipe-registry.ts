@@ -17,6 +17,20 @@ import type { Recipe } from "./detect";
  */
 export type RecipeKind = "inject" | "otlp";
 
+/**
+ * How the injected snippet reads the ingest key. The installer no longer writes
+ * the key anywhere (hands-off): the emitted code references an environment
+ * variable by name, and the wizard tells the user to set it from the dashboard.
+ * Client stacks need a framework-specific PUBLIC prefix so the bundler exposes
+ * the var to browser code; backend stacks read a plain `process.env` var.
+ */
+export interface KeyRef {
+  /** The env var the user must set (with the framework's public prefix). */
+  envVar: string;
+  /** The exact code expression the snippet uses to read it. */
+  expr: string;
+}
+
 export interface RecipeMeta {
   /**
    * design-system Stack id passed to buildAgentPrompt() (attribution) and the
@@ -30,7 +44,39 @@ export interface RecipeMeta {
   serviceName: string;
   /** How the recipe is applied. */
   kind: RecipeKind;
+  /**
+   * How the injected snippet reads the key. Undefined when the recipe injects no
+   * key at all: `tauri` (routes to the local Rust store), `otlp` (uses OTLP env
+   * headers), and `angular` (guidance-only — no browser-safe env mechanism, so
+   * it points the user at `environment.ts` instead).
+   */
+  keyRef?: KeyRef;
 }
+
+// Framework public-env references. Vite-based client stacks (SvelteKit, Nuxt,
+// Remix/RR7, Astro, vite-spa) read `import.meta.env`; Next uses `process.env`
+// with its NEXT_PUBLIC_ prefix; Expo/React Native uses EXPO_PUBLIC_. Backend-JS
+// reads a plain server var.
+const VITE_KEY: KeyRef = {
+  envVar: "VITE_CRUMBTRAIL_KEY",
+  expr: "import.meta.env.VITE_CRUMBTRAIL_KEY",
+};
+const NEXT_KEY: KeyRef = {
+  envVar: "NEXT_PUBLIC_CRUMBTRAIL_KEY",
+  expr: "process.env.NEXT_PUBLIC_CRUMBTRAIL_KEY",
+};
+const ASTRO_KEY: KeyRef = {
+  envVar: "PUBLIC_CRUMBTRAIL_KEY",
+  expr: "import.meta.env.PUBLIC_CRUMBTRAIL_KEY",
+};
+const EXPO_KEY: KeyRef = {
+  envVar: "EXPO_PUBLIC_CRUMBTRAIL_KEY",
+  expr: "process.env.EXPO_PUBLIC_CRUMBTRAIL_KEY",
+};
+const NODE_KEY: KeyRef = {
+  envVar: "CRUMBTRAIL_KEY",
+  expr: "process.env.CRUMBTRAIL_KEY",
+};
 
 /**
  * Exhaustive registry keyed by `Recipe`. Typed `Record<Recipe, RecipeMeta>` so a
@@ -48,78 +94,92 @@ export const RECIPE_REGISTRY: Record<Recipe, RecipeMeta> = {
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    keyRef: NEXT_KEY,
   },
   sveltekit: {
     stack: "svelte", // no "sveltekit" Stack id — svelte is the closest js stack
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    keyRef: VITE_KEY,
   },
   nuxt: {
     stack: "vue", // no "nuxt" Stack id — vue is the closest js stack
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    keyRef: VITE_KEY, // Nuxt is Vite-based; a client plugin reads import.meta.env
   },
   remix: {
     stack: "react", // no "remix" Stack id — react is the closest js stack
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    keyRef: VITE_KEY, // React Router 7 / Remix (Vite) exposes import.meta.env
   },
   astro: {
     stack: "vite", // no "astro" Stack id — vite is the closest generic frontend stack
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    keyRef: ASTRO_KEY, // Astro exposes PUBLIC_-prefixed vars on import.meta.env
   },
   angular: {
     stack: "vite", // no "angular" Stack id — vite is the closest generic frontend stack
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    // No keyRef: a standard Angular browser build has no import.meta.env /
+    // process.env, so planAngular hands off with guidance to use environment.ts.
   },
   "vite-spa": {
     stack: "vite",
     sdkPackages: ["crumbtrail-core"],
     serviceName: "web",
     kind: "inject",
+    keyRef: VITE_KEY,
   },
   nestjs: {
     stack: "node", // no "nestjs" Stack id — node is the backend-JS stack
     sdkPackages: ["crumbtrail-core", "crumbtrail-node"],
     serviceName: "api",
     kind: "inject",
+    keyRef: NODE_KEY,
   },
   express: {
     stack: "express",
     sdkPackages: ["crumbtrail-core", "crumbtrail-node"],
     serviceName: "api",
     kind: "inject",
+    keyRef: NODE_KEY,
   },
   hono: {
     stack: "hono",
     sdkPackages: ["crumbtrail-core", "crumbtrail-node"],
     serviceName: "api",
     kind: "inject",
+    keyRef: NODE_KEY,
   },
   fastify: {
     stack: "node", // no dedicated "fastify" Stack id — node is the backend-JS stack
     sdkPackages: ["crumbtrail-core", "crumbtrail-node"],
     serviceName: "api",
     kind: "inject",
+    keyRef: NODE_KEY,
   },
   "react-native": {
     stack: "react", // no "react-native" Stack id — react is the closest js stack
     sdkPackages: ["crumbtrail-core", "crumbtrail-react-native"],
     serviceName: "app",
     kind: "inject",
+    keyRef: EXPO_KEY,
   },
   node: {
     stack: "node",
     sdkPackages: ["crumbtrail-core", "crumbtrail-node"],
     serviceName: "api",
     kind: "inject",
+    keyRef: NODE_KEY,
   },
   otlp: {
     // PLACEHOLDER ONLY. `otlp` is the single recipe that carries a VARIABLE

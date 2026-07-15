@@ -1,5 +1,6 @@
-// Provisioning: pick/create a project, add a service, mint an ingest key —
-// all via the existing cloud routes, carrying the CLI bearer token. See
+// Provisioning: pick/create a project and add a service via the existing cloud
+// routes, carrying the CLI bearer token. Hands-off — it does NOT mint an ingest
+// key; the user mints one in the dashboard and sets it in their env. See
 // plans/cli-setup-wizard-design.md §4. Network calls inherit net.ts's
 // single-retry + method/URL-in-message policy.
 
@@ -129,19 +130,6 @@ export async function createService(
   });
 }
 
-export async function createServiceKey(
-  base: string,
-  token: string,
-  serviceId: string,
-  fetchImpl?: typeof fetch,
-): Promise<string> {
-  const res = await requestJson<{ apiKey: string }>(
-    `${base}/api/services/${serviceId}/keys`,
-    { method: "POST", token, body: {}, fetchImpl },
-  );
-  return res.apiKey;
-}
-
 // ── Orchestrated flow ────────────────────────────────────────────────────────
 
 export interface ProvisionInput {
@@ -172,7 +160,6 @@ export interface ProvisionResult {
   projectName: string;
   serviceId: string;
   serviceName: string;
-  apiKey: string;
 }
 
 export interface ResolveProjectInput {
@@ -249,13 +236,15 @@ export interface ProvisionServiceInput {
 }
 
 /**
- * Add one service to an already-resolved project and mint its ingest key.
+ * Add one service to an already-resolved project. Hands-off: it does NOT mint an
+ * ingest key — the user mints one in the dashboard and sets it in their env. The
+ * created service is what gives them somewhere to mint that key against.
  * Prompt-free by design: the batch installer names services from detection
  * rather than asking N times.
  */
 export async function provisionService(
   input: ProvisionServiceInput,
-): Promise<{ serviceId: string; serviceName: string; apiKey: string }> {
+): Promise<{ serviceId: string; serviceName: string }> {
   const { base, token, ui, fetchImpl } = input;
   // Prefer the DETECTED otlp stack when present; otherwise the registry stack.
   // For otlp the registry value is only a placeholder, so input.stack is what
@@ -270,10 +259,7 @@ export async function provisionService(
   );
   ui.out(`${color.green("✓")} Service: ${color.bold(service.name)}`);
 
-  const apiKey = await createServiceKey(base, token, service.id, fetchImpl);
-  ui.out(`${color.green("✓")} Minted an ingest key.`);
-
-  return { serviceId: service.id, serviceName: service.name, apiKey };
+  return { serviceId: service.id, serviceName: service.name };
 }
 
 /**
@@ -309,8 +295,8 @@ export function uniqueServiceNames(
 }
 
 /**
- * Resolve a project, add a service to it, and mint the ingest key returned to
- * the wizard for injection + summary. Composed from resolveProject +
+ * Resolve a project and add a service to it, returned to the wizard for the
+ * summary. Hands-off — no key is minted. Composed from resolveProject +
  * provisionService so the single-package path keeps its exact behavior
  * (including the interactive "Service name" prompt).
  */
@@ -343,6 +329,5 @@ export async function provisionFlow(
     projectName: project.name,
     serviceId: service.serviceId,
     serviceName: service.serviceName,
-    apiKey: service.apiKey,
   };
 }

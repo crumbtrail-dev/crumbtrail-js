@@ -56,10 +56,18 @@ npx crumbtrail --yes --project prj_1234abcd --only web --skip-verify
 
 ## What it writes
 
-Only two kinds of change, both in the package it's wiring:
+Only one kind of change, in the package it's wiring:
 
 - the SDK import and `Crumbtrail.init(...)` call in your entry file
-- `CRUMBTRAIL_KEY` appended to that package's `.env`
+
+The wizard is **hands-off with your ingest key**: it never writes the key to a
+file. The injected code reads it from a framework-appropriate environment
+variable, and the wizard tells you which one to set — for example
+`NEXT_PUBLIC_CRUMBTRAIL_KEY` (Next), `VITE_CRUMBTRAIL_KEY` (Vite / SvelteKit /
+Nuxt / Remix), `PUBLIC_CRUMBTRAIL_KEY` (Astro), `EXPO_PUBLIC_CRUMBTRAIL_KEY`
+(Expo / React Native), or `CRUMBTRAIL_KEY` (Node backends). Mint the key in the
+dashboard and set that variable in your own `.env`, so a live credential never
+lands in committed source.
 
 It won't touch a package that is already wired, and it never edits libraries or
 config-only packages.

@@ -5,8 +5,16 @@ import { fakeInjectIO } from "./helpers";
 
 const CWD = "/proj";
 const ENDPOINT = "https://ingest.example.com";
-const KEY = "bl_ingest_abc123";
+// The installer is hands-off: printed guidance carries this placeholder, never a
+// live minted key. Injected code reads the key from an env var, never a literal.
+const KEY_PLACEHOLDER = "<your-ingest-key>";
 const p = (...parts: string[]) => path.join(CWD, ...parts);
+
+// A snippet/plan-content must never leak a real ingest-key literal. The historic
+// key prefixes were `ctkey_` / `bgk_` / `bl_ingest_`; guard against all of them.
+function expectNoKeyLiteral(text: string | null | undefined): void {
+  expect(text ?? "").not.toMatch(/ctkey_|bgk_|bl_ingest_/);
+}
 
 describe("supportsInstrumentationClient", () => {
   it("is true for >=15.3 and non-numeric ranges, false below", () => {
@@ -20,14 +28,13 @@ describe("supportsInstrumentationClient", () => {
 });
 
 describe("buildPlan — Next.js", () => {
-  it("creates instrumentation-client.ts for modern Next with the real key inlined", () => {
+  it("creates instrumentation-client.ts for modern Next reading the env key (no literal)", () => {
     const io = fakeInjectIO({ [p("package.json")]: "{}" });
     const plan = buildPlan(
       {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "15.4.0",
       },
       io,
@@ -35,8 +42,15 @@ describe("buildPlan — Next.js", () => {
     expect(plan.kind).toBe("create");
     expect(plan.targetPath).toBe(p("instrumentation-client.ts"));
     expect(plan.content).toContain(`httpEndpoint: "${ENDPOINT}"`);
-    expect(plan.content).toContain(`httpAuthToken: "${KEY}"`);
+    // Hands-off: the snippet reads the key from the framework env var, not a
+    // baked-in literal.
+    expect(plan.content).toContain(
+      "httpAuthToken: process.env.NEXT_PUBLIC_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.content);
     expect(plan.content).toContain('from "crumbtrail-core"');
+    // The wizard prints this var name + "mint in the dashboard".
+    expect(plan.keyEnvVar).toBe("NEXT_PUBLIC_CRUMBTRAIL_KEY");
   });
 
   it("prefers src/ when the app uses a src directory", () => {
@@ -49,7 +63,6 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "15.4.0",
       },
       io,
@@ -71,7 +84,6 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "14.2.0",
       },
       io,
@@ -79,7 +91,9 @@ describe("buildPlan — Next.js", () => {
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.warnings.join(" ")).toMatch(/use client|Server Component/i);
     expect(plan.snippet).toContain(`httpEndpoint: "${ENDPOINT}"`);
-    expect(plan.agentPrompt).toContain(KEY);
+    // Hands-off: the agent prompt shows the placeholder, never a live key.
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
+    expectNoKeyLiteral(plan.agentPrompt);
   });
 
   it("prepends into pages/_app.tsx for legacy Next with a Pages Router", () => {
@@ -93,7 +107,6 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "14.2.0",
       },
       io,
@@ -114,7 +127,6 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "14.2.0",
       },
       io,
@@ -139,7 +151,6 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "14.0.0",
       },
       io,
@@ -164,7 +175,6 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "^15",
       },
       io,
@@ -180,14 +190,14 @@ describe("buildPlan — Next.js", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "13.0.0",
       },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.agentPrompt).toContain(ENDPOINT);
-    expect(plan.agentPrompt).toContain(KEY);
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
+    expectNoKeyLiteral(plan.agentPrompt);
   });
 });
 
@@ -203,12 +213,13 @@ describe("buildPlan — idempotency", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "15.4.0",
       },
       io,
     );
     expect(plan.kind).toBe("skip-already-wired");
+    // Nothing to set: an already-wired plan carries no env-var guidance.
+    expect(plan.keyEnvVar).toBeUndefined();
   });
 
   it("skips when the target file already references crumbtrail", () => {
@@ -222,7 +233,6 @@ describe("buildPlan — idempotency", () => {
         cwd: CWD,
         recipe: "next",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         nextVersion: "15.4.0",
       },
       io,
@@ -232,14 +242,19 @@ describe("buildPlan — idempotency", () => {
 });
 
 describe("buildPlan — SvelteKit / Nuxt", () => {
-  it("creates src/hooks.client.ts for SvelteKit when absent", () => {
+  it("creates src/hooks.client.ts for SvelteKit reading the Vite env key (no literal)", () => {
     const io = fakeInjectIO({ [p("package.json")]: "{}" });
     const plan = buildPlan(
-      { cwd: CWD, recipe: "sveltekit", endpoint: ENDPOINT, apiKey: KEY },
+      { cwd: CWD, recipe: "sveltekit", endpoint: ENDPOINT },
       io,
     );
     expect(plan.kind).toBe("create");
     expect(plan.targetPath).toBe(p("src", "hooks.client.ts"));
+    expect(plan.content).toContain(
+      "httpAuthToken: import.meta.env.VITE_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.content);
+    expect(plan.keyEnvVar).toBe("VITE_CRUMBTRAIL_KEY");
   });
 
   it("prepends into an existing hooks.client.ts", () => {
@@ -248,22 +263,24 @@ describe("buildPlan — SvelteKit / Nuxt", () => {
       [p("src", "hooks.client.ts")]: "export const handleError = () => {};\n",
     });
     const plan = buildPlan(
-      { cwd: CWD, recipe: "sveltekit", endpoint: ENDPOINT, apiKey: KEY },
+      { cwd: CWD, recipe: "sveltekit", endpoint: ENDPOINT },
       io,
     );
     expect(plan.kind).toBe("prepend");
   });
 
-  it("creates a Nuxt client plugin wrapped in defineNuxtPlugin", () => {
+  it("creates a Nuxt client plugin wrapped in defineNuxtPlugin reading the Vite env key", () => {
     // No app/ dir (Nuxt 3 default): the plugin lands in the repo-root plugins/.
     const io = fakeInjectIO({ [p("package.json")]: "{}" });
-    const plan = buildPlan(
-      { cwd: CWD, recipe: "nuxt", endpoint: ENDPOINT, apiKey: KEY },
-      io,
-    );
+    const plan = buildPlan({ cwd: CWD, recipe: "nuxt", endpoint: ENDPOINT }, io);
     expect(plan.kind).toBe("create");
     expect(plan.targetPath).toBe(p("plugins", "crumbtrail.client.ts"));
     expect(plan.content).toContain("defineNuxtPlugin");
+    expect(plan.content).toContain(
+      "httpAuthToken: import.meta.env.VITE_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.content);
+    expect(plan.keyEnvVar).toBe("VITE_CRUMBTRAIL_KEY");
   });
 
   // Nuxt 4's default srcDir is app/, so plugins live in app/plugins/. When app/
@@ -275,10 +292,7 @@ describe("buildPlan — SvelteKit / Nuxt", () => {
       [p("package.json")]: "{}",
       [p("app")]: "", // marker: exists() is true for the app/ dir
     });
-    const plan = buildPlan(
-      { cwd: CWD, recipe: "nuxt", endpoint: ENDPOINT, apiKey: KEY },
-      io,
-    );
+    const plan = buildPlan({ cwd: CWD, recipe: "nuxt", endpoint: ENDPOINT }, io);
     expect(plan.kind).toBe("create");
     expect(plan.targetPath).toBe(p("app", "plugins", "crumbtrail.client.ts"));
     expect(plan.content).toContain("defineNuxtPlugin");
@@ -286,7 +300,7 @@ describe("buildPlan — SvelteKit / Nuxt", () => {
 });
 
 describe("buildPlan — React Native", () => {
-  it("prepends the imperative createReactNativeCrumbtrail block into the entry", () => {
+  it("prepends the imperative createReactNativeCrumbtrail block reading the Expo env key", () => {
     const io = fakeInjectIO({
       [p("package.json")]: "{}",
       [p("App.tsx")]: "export default function App() {}\n",
@@ -296,7 +310,6 @@ describe("buildPlan — React Native", () => {
         cwd: CWD,
         recipe: "react-native",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("App.tsx"),
       },
       io,
@@ -304,7 +317,11 @@ describe("buildPlan — React Native", () => {
     expect(plan.kind).toBe("prepend");
     expect(plan.content).toContain("createReactNativeCrumbtrail");
     expect(plan.content).toContain(`httpEndpoint: "${ENDPOINT}"`);
-    expect(plan.content).toContain(`httpAuthToken: "${KEY}"`);
+    expect(plan.content).toContain(
+      "httpAuthToken: process.env.EXPO_PUBLIC_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.content);
+    expect(plan.keyEnvVar).toBe("EXPO_PUBLIC_CRUMBTRAIL_KEY");
     // Must NOT wrap a Provider — the engine can't transform JSX.
     expect(plan.content).not.toContain("CrumbtrailReactNativeProvider");
   });
@@ -316,14 +333,14 @@ describe("buildPlan — React Native", () => {
         cwd: CWD,
         recipe: "react-native",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.snippet).toContain("createReactNativeCrumbtrail");
-    expect(plan.agentPrompt).toContain(KEY);
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
+    expectNoKeyLiteral(plan.agentPrompt);
   });
 });
 
@@ -338,7 +355,6 @@ describe("buildPlan — Tauri", () => {
         cwd: CWD,
         recipe: "tauri",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("src", "main.ts"),
       },
       io,
@@ -348,6 +364,10 @@ describe("buildPlan — Tauri", () => {
     expect(plan.content).toContain('from "crumbtrail-tauri"');
     // transportInstance override, NOT the `transport` string-mode field.
     expect(plan.content).not.toMatch(/transport:\s*new TauriTransport/);
+    // Tauri routes to the local Rust store — it injects no key, so there is no
+    // env var to set.
+    expect(plan.keyEnvVar).toBeUndefined();
+    expectNoKeyLiteral(plan.content);
     // The JS injection alone is inert without the two Rust-side steps — the plan
     // must warn about BOTH (plugin registration + capability permission).
     const warnings = plan.warnings.join("\n");
@@ -362,7 +382,6 @@ describe("buildPlan — Tauri", () => {
         cwd: CWD,
         recipe: "tauri",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
@@ -386,7 +405,6 @@ describe("buildPlan — Tauri", () => {
         cwd: CWD,
         recipe: "tauri",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("src", "main.ts"),
       },
       io,
@@ -406,7 +424,6 @@ describe("buildPlan — dirty file + ambiguity", () => {
         cwd: CWD,
         recipe: "vite-spa",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("src", "main.tsx"),
       },
       io,
@@ -414,7 +431,7 @@ describe("buildPlan — dirty file + ambiguity", () => {
     expect(plan.kind).toBe("needs-confirm-dirty");
   });
 
-  it("prepends a dirty target when force is set", () => {
+  it("prepends a dirty target when force is set, reading the Vite env key (no literal)", () => {
     const io = fakeInjectIO(
       { [p("package.json")]: "{}", [p("src", "main.tsx")]: "render();\n" },
       { dirty: [p("src", "main.tsx")] },
@@ -424,13 +441,17 @@ describe("buildPlan — dirty file + ambiguity", () => {
         cwd: CWD,
         recipe: "vite-spa",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("src", "main.tsx"),
         options: { force: true },
       },
       io,
     );
     expect(plan.kind).toBe("prepend");
+    expect(plan.content).toContain(
+      "httpAuthToken: import.meta.env.VITE_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.content);
+    expect(plan.keyEnvVar).toBe("VITE_CRUMBTRAIL_KEY");
   });
 
   it("falls back to AI with a filled snippet when the entry is unresolved", () => {
@@ -440,39 +461,41 @@ describe("buildPlan — dirty file + ambiguity", () => {
         cwd: CWD,
         recipe: "vite-spa",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.snippet).toContain(ENDPOINT);
-    expect(plan.agentPrompt).toContain(KEY);
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
+    expectNoKeyLiteral(plan.agentPrompt);
   });
 });
 
 describe("buildPlan — backend-JS recipes (express/hono/fastify)", () => {
   for (const recipe of ["express", "hono", "fastify"] as const) {
-    it(`${recipe}: prepends the headless-session block + env action when the entry resolves`, () => {
-      const io = fakeInjectIO(
-        { [p("package.json")]: "{}", [p("server.js")]: "x\n" },
-        { gitignore: ".env\n" },
-      );
+    it(`${recipe}: prepends the headless-session block reading process.env.CRUMBTRAIL_KEY`, () => {
+      const io = fakeInjectIO({
+        [p("package.json")]: "{}",
+        [p("server.js")]: "x\n",
+      });
       const plan = buildPlan(
         {
           cwd: CWD,
           recipe,
           endpoint: ENDPOINT,
-          apiKey: KEY,
           entryFile: p("server.js"),
         },
         io,
       );
       expect(plan.kind).toBe("prepend");
       expect(plan.recipe).toBe(recipe);
+      // The server snippet reads the key from process.env; the installer writes
+      // nothing to .env (hands-off). The wizard names the var via keyEnvVar.
       expect(plan.content).toContain("process.env.CRUMBTRAIL_KEY");
       expect(plan.content).toContain("autoCapture");
-      expect(plan.envAction?.line).toBe(`CRUMBTRAIL_KEY=${KEY}`);
+      expect(plan.keyEnvVar).toBe("CRUMBTRAIL_KEY");
+      expectNoKeyLiteral(plan.content);
       // Non-Nest backends keep Prettier's default double-quote snippet; only
       // Nest forks to single quotes (BUG-12).
       expect(plan.content).toContain('import("crumbtrail-node")');
@@ -489,7 +512,6 @@ describe("buildPlan — backend-JS recipes (express/hono/fastify)", () => {
           cwd: CWD,
           recipe,
           endpoint: ENDPOINT,
-          apiKey: KEY,
           entryFile: p("server.js"),
         },
         io,
@@ -500,13 +522,14 @@ describe("buildPlan — backend-JS recipes (express/hono/fastify)", () => {
     it(`${recipe}: falls back to AI with the backend agent prompt when the entry is unresolved`, () => {
       const io = fakeInjectIO({ [p("package.json")]: "{}" });
       const plan = buildPlan(
-        { cwd: CWD, recipe, endpoint: ENDPOINT, apiKey: KEY, entryFile: null },
+        { cwd: CWD, recipe, endpoint: ENDPOINT, entryFile: null },
         io,
       );
       expect(plan.kind).toBe("fallback-ai");
       expect(plan.snippet).toContain(ENDPOINT);
-      expect(plan.agentPrompt).toContain(KEY);
+      expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
       expect(plan.agentPrompt).toContain("crumbtrail-node");
+      expectNoKeyLiteral(plan.agentPrompt);
     });
 
     it(`${recipe}: skips when the project already references crumbtrail`, () => {
@@ -520,7 +543,6 @@ describe("buildPlan — backend-JS recipes (express/hono/fastify)", () => {
           cwd: CWD,
           recipe,
           endpoint: ENDPOINT,
-          apiKey: KEY,
           entryFile: p("server.js"),
         },
         io,
@@ -537,7 +559,7 @@ describe("buildPlan — backend fallback prompt is stack-appropriate", () => {
   const fallback = (recipe: "express" | "hono" | "fastify") => {
     const io = fakeInjectIO({ [p("package.json")]: "{}" });
     const plan = buildPlan(
-      { cwd: CWD, recipe, endpoint: ENDPOINT, apiKey: KEY, entryFile: null },
+      { cwd: CWD, recipe, endpoint: ENDPOINT, entryFile: null },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
@@ -562,8 +584,42 @@ describe("buildPlan — backend fallback prompt is stack-appropriate", () => {
   }
 });
 
+describe("buildPlan — Node recipe", () => {
+  it("prepends the headless-session block reading process.env.CRUMBTRAIL_KEY (no literal)", () => {
+    const io = fakeInjectIO({
+      [p("package.json")]: "{}",
+      [p("server.js")]: "const app = express();\n",
+    });
+    const plan = buildPlan(
+      {
+        cwd: CWD,
+        recipe: "node",
+        endpoint: ENDPOINT,
+        entryFile: p("server.js"),
+      },
+      io,
+    );
+    expect(plan.kind).toBe("prepend");
+    expect(plan.content).toContain("process.env.CRUMBTRAIL_KEY");
+    expect(plan.content).toContain("autoCapture");
+    expect(plan.keyEnvVar).toBe("CRUMBTRAIL_KEY");
+    expectNoKeyLiteral(plan.content);
+  });
+
+  it("falls back to AI when the Node entry is unresolved", () => {
+    const io = fakeInjectIO({ [p("package.json")]: "{}" });
+    const plan = buildPlan(
+      { cwd: CWD, recipe: "node", endpoint: ENDPOINT, entryFile: null },
+      io,
+    );
+    expect(plan.kind).toBe("fallback-ai");
+    expect(plan.agentPrompt).toContain("crumbtrail-node");
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
+  });
+});
+
 describe("buildPlan — Remix", () => {
-  it("prepends the client init into the resolved entry.client", () => {
+  it("prepends the client init reading the Vite env key into the resolved entry.client", () => {
     const io = fakeInjectIO({
       [p("package.json")]: "{}",
       [p("app", "entry.client.tsx")]: "hydrateRoot();\n",
@@ -573,7 +629,6 @@ describe("buildPlan — Remix", () => {
         cwd: CWD,
         recipe: "remix",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("app", "entry.client.tsx"),
       },
       io,
@@ -581,7 +636,12 @@ describe("buildPlan — Remix", () => {
     expect(plan.kind).toBe("prepend");
     expect(plan.targetPath).toBe(p("app", "entry.client.tsx"));
     expect(plan.content).toContain(`httpEndpoint: "${ENDPOINT}"`);
+    expect(plan.content).toContain(
+      "httpAuthToken: import.meta.env.VITE_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.content);
     expect(plan.content).toContain('from "crumbtrail-core"');
+    expect(plan.keyEnvVar).toBe("VITE_CRUMBTRAIL_KEY");
   });
 
   it("falls back to AI (never creates) when entry.client is absent", () => {
@@ -591,14 +651,14 @@ describe("buildPlan — Remix", () => {
         cwd: CWD,
         recipe: "remix",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.snippet).toContain(ENDPOINT);
-    expect(plan.agentPrompt).toContain(KEY);
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
+    expectNoKeyLiteral(plan.agentPrompt);
   });
 
   // React Router 7's default template hides the client entry until the user runs
@@ -611,7 +671,6 @@ describe("buildPlan — Remix", () => {
         cwd: CWD,
         recipe: "remix",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
@@ -622,28 +681,35 @@ describe("buildPlan — Remix", () => {
 });
 
 describe("buildPlan — Astro", () => {
-  it("always falls back to a guided snippet even with no entry", () => {
+  it("always falls back to a guided snippet reading the Astro PUBLIC env key", () => {
     const io = fakeInjectIO({ [p("package.json")]: "{}" });
     const plan = buildPlan(
       {
         cwd: CWD,
         recipe: "astro",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.snippet).toContain(`httpEndpoint: "${ENDPOINT}"`);
+    expect(plan.snippet).toContain(
+      "httpAuthToken: import.meta.env.PUBLIC_CRUMBTRAIL_KEY",
+    );
+    expectNoKeyLiteral(plan.snippet);
     expect(plan.snippet).toContain('from "crumbtrail-core"');
-    expect(plan.agentPrompt).toContain(KEY);
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
     expect(plan.warnings.join(" ")).toMatch(/layout/i);
+    expect(plan.keyEnvVar).toBe("PUBLIC_CRUMBTRAIL_KEY");
   });
 });
 
 describe("buildPlan — Angular", () => {
-  it("prepends the client init into src/main.ts", () => {
+  // Angular has no browser-safe env-var mechanism (no import.meta.env /
+  // process.env), so there is NO keyRef in the registry. planAngular always hands
+  // off with guidance to add the key to environment.ts — never a prepend/create.
+  it("always hands off with environment.ts guidance (never prepends)", () => {
     const io = fakeInjectIO({
       [p("package.json")]: "{}",
       [p("src", "main.ts")]: "bootstrapApplication(AppComponent);\n",
@@ -653,45 +719,47 @@ describe("buildPlan — Angular", () => {
         cwd: CWD,
         recipe: "angular",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("src", "main.ts"),
       },
       io,
     );
-    expect(plan.kind).toBe("prepend");
-    expect(plan.targetPath).toBe(p("src", "main.ts"));
-    expect(plan.content).toContain(`httpAuthToken: "${KEY}"`);
+    expect(plan.kind).toBe("fallback-ai");
+    // The snippet reads the key from environment.ts, not an env var or literal.
+    expect(plan.snippet).toContain("httpAuthToken: environment.crumbtrailKey");
+    expectNoKeyLiteral(plan.snippet);
+    expect(plan.warnings.join(" ")).toMatch(/environment\.ts/i);
+    // No browser-safe env var → no keyEnvVar guidance.
+    expect(plan.keyEnvVar).toBeUndefined();
   });
 
-  it("falls back to AI when the Angular entry is unresolved", () => {
+  it("still hands off with guidance when the Angular entry is unresolved", () => {
     const io = fakeInjectIO({ [p("package.json")]: "{}" });
     const plan = buildPlan(
       {
         cwd: CWD,
         recipe: "angular",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
     );
     expect(plan.kind).toBe("fallback-ai");
     expect(plan.snippet).toContain(ENDPOINT);
+    expect(plan.keyEnvVar).toBeUndefined();
   });
 });
 
 describe("buildPlan — NestJS", () => {
-  it("prepends the headless-session block + env action into src/main.ts", () => {
-    const io = fakeInjectIO(
-      { [p("package.json")]: "{}", [p("src", "main.ts")]: "bootstrap();\n" },
-      { gitignore: ".env\n" },
-    );
+  it("prepends the headless-session block reading process.env.CRUMBTRAIL_KEY into src/main.ts", () => {
+    const io = fakeInjectIO({
+      [p("package.json")]: "{}",
+      [p("src", "main.ts")]: "bootstrap();\n",
+    });
     const plan = buildPlan(
       {
         cwd: CWD,
         recipe: "nestjs",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: p("src", "main.ts"),
       },
       io,
@@ -701,7 +769,8 @@ describe("buildPlan — NestJS", () => {
     expect(plan.targetPath).toBe(p("src", "main.ts"));
     expect(plan.content).toContain("autoCapture");
     expect(plan.content).toContain("process.env.CRUMBTRAIL_KEY");
-    expect(plan.envAction?.line).toBe(`CRUMBTRAIL_KEY=${KEY}`);
+    expect(plan.keyEnvVar).toBe("CRUMBTRAIL_KEY");
+    expectNoKeyLiteral(plan.content);
     // BUG-12: Nest scaffolds default to Prettier `singleQuote: true`, so the
     // injected block must use single quotes — never the double-quoted node form.
     expect(plan.content).toContain("import('crumbtrail-node')");
@@ -717,7 +786,6 @@ describe("buildPlan — NestJS", () => {
         cwd: CWD,
         recipe: "nestjs",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: null,
       },
       io,
@@ -727,78 +795,14 @@ describe("buildPlan — NestJS", () => {
   });
 });
 
-describe("buildPlan — Node .env handling", () => {
-  it("appends CRUMBTRAIL_KEY and warns when .env is not gitignored", () => {
-    const io = fakeInjectIO({
-      [p("package.json")]: "{}",
-      [p("server.js")]: "const app = express();\n",
-      [p(".env")]: "FOO=1\n",
-    });
-    const plan = buildPlan(
-      {
-        cwd: CWD,
-        recipe: "node",
-        endpoint: ENDPOINT,
-        apiKey: KEY,
-        entryFile: p("server.js"),
-      },
-      io,
-    );
-    expect(plan.kind).toBe("prepend");
-    expect(plan.content).toContain("process.env.CRUMBTRAIL_KEY");
-    expect(plan.envAction?.line).toBe(`CRUMBTRAIL_KEY=${KEY}`);
-    expect(plan.envAction?.gitignoreWarning).toMatch(/gitignore/i);
-    expect(plan.warnings.join(" ")).toMatch(/gitignore/i);
-  });
-
-  it("emits no gitignore warning when .env is covered", () => {
-    const io = fakeInjectIO(
-      { [p("package.json")]: "{}", [p("server.js")]: "x\n" },
-      { gitignore: "node_modules\n.env\n" },
-    );
-    const plan = buildPlan(
-      {
-        cwd: CWD,
-        recipe: "node",
-        endpoint: ENDPOINT,
-        apiKey: KEY,
-        entryFile: p("server.js"),
-      },
-      io,
-    );
-    expect(plan.envAction?.gitignoreWarning).toBeUndefined();
-  });
-
-  it("omits the env action when CRUMBTRAIL_KEY is already present", () => {
-    const io = fakeInjectIO({
-      [p("package.json")]: "{}",
-      [p("server.js")]: "x\n",
-      [p(".env")]: "CRUMBTRAIL_KEY=old\n",
-    });
-    const plan = buildPlan(
-      {
-        cwd: CWD,
-        recipe: "node",
-        endpoint: ENDPOINT,
-        apiKey: KEY,
-        entryFile: p("server.js"),
-      },
-      io,
-    );
-    expect(plan.envAction).toBeUndefined();
-    expect(plan.warnings.join(" ")).toMatch(/already present/i);
-  });
-});
-
 describe("buildPlan — otlp guidance (non-JS backends)", () => {
-  it("returns a non-mutating otlp-guidance plan with snippet + agent prompt", () => {
+  it("returns a non-mutating otlp-guidance plan with a placeholder-keyed snippet + prompt", () => {
     const io = fakeInjectIO({});
     const plan = buildPlan(
       {
         cwd: CWD,
         recipe: "otlp",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         stack: "fastapi",
       },
       io,
@@ -806,14 +810,18 @@ describe("buildPlan — otlp guidance (non-JS backends)", () => {
     expect(plan.kind).toBe("otlp-guidance");
     expect(plan.targetPath).toBeNull();
     expect(plan.content).toBeNull();
-    // OTLP env snippet is filled with the real endpoint/key.
+    // OTLP env snippet carries the real endpoint but only the placeholder key
+    // (hands-off — no minted key is ever printed).
     expect(plan.snippet).toContain(`OTEL_EXPORTER_OTLP_ENDPOINT=${ENDPOINT}`);
-    expect(plan.snippet).toContain(`X-Crumbtrail-Auth=${KEY}`);
+    expect(plan.snippet).toContain(`X-Crumbtrail-Auth=${KEY_PLACEHOLDER}`);
     expect(plan.snippet).toContain("crumbtrail.session.id");
+    expectNoKeyLiteral(plan.snippet);
     // Agent prompt routes to the no-SDK OTLP variant (no PRESET_PASSIVE).
     expect(plan.agentPrompt).toContain(ENDPOINT);
-    expect(plan.agentPrompt).toContain(KEY);
+    expect(plan.agentPrompt).toContain(KEY_PLACEHOLDER);
     expect(plan.agentPrompt).not.toContain("PRESET_PASSIVE");
+    // otlp injects no key via an env var — it uses OTLP headers instead.
+    expect(plan.keyEnvVar).toBeUndefined();
   });
 
   it("keys the agent prompt to the DETECTED stack, not the registry placeholder", () => {
@@ -826,7 +834,6 @@ describe("buildPlan — otlp guidance (non-JS backends)", () => {
         cwd: CWD,
         recipe: "otlp",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         stack: "go",
       },
       io,

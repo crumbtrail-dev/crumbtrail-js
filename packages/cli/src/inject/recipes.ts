@@ -15,17 +15,28 @@ import type { Stack } from "crumbtrail-core";
 import type { Recipe } from "../detect";
 import { RECIPE_REGISTRY } from "../recipe-registry";
 import { defaultInjectIO, type InjectIO } from "./io";
-import type { EnvAction, Plan } from "./types";
+import type { Plan } from "./types";
 import { referencesCrumbtrail, withTrailingNewline } from "./text";
 import {
   clientInitSnippet,
-  envKeyLine,
   nestInitSnippet,
   nodeInitSnippet,
   nuxtPluginSnippet,
   reactNativeInitSnippet,
   tauriInitSnippet,
 } from "./snippets";
+
+/**
+ * Placeholder used in printed guidance (fallback-ai + OTLP) now that the
+ * installer never mints a key. The user replaces it with the key they mint in
+ * the dashboard. Never written to a file — only shown in copyable instructions.
+ */
+const KEY_PLACEHOLDER = "<your-ingest-key>";
+
+/** The code expression an injected snippet uses to read the key, per recipe. */
+function keyExprFor(recipe: Recipe): string | undefined {
+  return RECIPE_REGISTRY[recipe].keyRef?.expr;
+}
 
 export interface BuildPlanOptions {
   /** Prepend into a dirty (uncommitted) target instead of asking to confirm. */
@@ -36,7 +47,6 @@ export interface BuildPlanInput {
   cwd: string;
   recipe: Recipe;
   endpoint: string;
-  apiKey: string;
   /** Absolute entry path for vite-spa / node (from detection). */
   entryFile?: string | null;
   /** Raw `next` version range from detection (drives new-file vs legacy-prepend). */
@@ -69,7 +79,6 @@ function fallbackPlan(
   input: BuildPlanInput,
   snippet: string,
   warnings: string[],
-  envAction?: EnvAction,
 ): Plan {
   return {
     recipe: input.recipe,
@@ -77,13 +86,13 @@ function fallbackPlan(
     targetPath: null,
     content: null,
     snippet,
-    // Thread the real endpoint/apiKey through — never hardcode.
+    // Hands-off: the prompt reads the key from env / the dashboard, never a
+    // baked-in literal (KEY_PLACEHOLDER stands in for the user's own key).
     agentPrompt: buildAgentPrompt(RECIPE_REGISTRY[input.recipe].stack, {
       endpoint: input.endpoint,
-      apiKey: input.apiKey,
+      apiKey: KEY_PLACEHOLDER,
     }),
     warnings,
-    envAction,
   };
 }
 
@@ -92,7 +101,6 @@ function createPlan(
   target: string,
   block: string,
   warnings: string[] = [],
-  envAction?: EnvAction,
 ): Plan {
   return {
     recipe: input.recipe,
@@ -100,7 +108,6 @@ function createPlan(
     targetPath: target,
     content: withTrailingNewline(block),
     warnings,
-    envAction,
   };
 }
 
@@ -115,20 +122,14 @@ function prependWithPreflight(
   target: string,
   block: string,
   warnings: string[] = [],
-  envAction?: EnvAction,
 ): Plan {
   const existing = io.readFile(target);
   if (existing == null) {
     // Sanity: we thought this file existed but can't read it — hand off.
-    return fallbackPlan(
-      input,
-      block,
-      [
-        ...warnings,
-        `Could not read ${target}; use the snippet or AI prompt to wire it manually.`,
-      ],
-      envAction,
-    );
+    return fallbackPlan(input, block, [
+      ...warnings,
+      `Could not read ${target}; use the snippet or AI prompt to wire it manually.`,
+    ]);
   }
   if (referencesCrumbtrail(existing)) {
     return skipPlan(input, warnings);
@@ -144,7 +145,6 @@ function prependWithPreflight(
         ...warnings,
         `${target} has uncommitted changes — confirm (or re-run with force) before prepending.`,
       ],
-      envAction,
     };
   }
   return {
@@ -153,7 +153,6 @@ function prependWithPreflight(
     targetPath: target,
     content: block,
     warnings,
-    envAction,
   };
 }
 
@@ -221,34 +220,6 @@ export function supportsInstrumentationClient(
   return minor >= 3;
 }
 
-// --- env helper (node recipe) ------------------------------------------------
-
-function buildEnvAction(
-  cwd: string,
-  apiKey: string,
-  io: InjectIO,
-): { action?: EnvAction; warning?: string } {
-  const envPath = path.join(cwd, ".env");
-  const existing = io.readFile(envPath);
-  if (existing != null && /^CRUMBTRAIL_KEY=/m.test(existing)) {
-    return { warning: "CRUMBTRAIL_KEY already present in .env — left as-is." };
-  }
-  const gitignore = io.readGitignore(cwd);
-  const covered = gitignore != null && /^\s*\.env\b/m.test(gitignore);
-  return {
-    action: {
-      targetPath: envPath,
-      line: envKeyLine(apiKey),
-      gitignoreWarning: covered
-        ? undefined
-        : "`.env` is not covered by .gitignore — add `.env` so your ingest key is not committed.",
-    },
-    warning: covered
-      ? undefined
-      : "`.env` is not gitignored; the appended key could be committed.",
-  };
-}
-
 // --- per-recipe builders -----------------------------------------------------
 
 function firstExistingDir(io: InjectIO, ...dirs: string[]): string | null {
@@ -257,7 +228,7 @@ function firstExistingDir(io: InjectIO, ...dirs: string[]): string | null {
 
 function planNext(input: BuildPlanInput, io: InjectIO): Plan {
   const { cwd } = input;
-  const block = clientInitSnippet(input.endpoint, input.apiKey);
+  const block = clientInitSnippet(input.endpoint, keyExprFor(input.recipe)!);
   // Prefer `src/` when the app uses a src directory.
   const usesSrc =
     io.exists(path.join(cwd, "src", "app")) ||
@@ -318,7 +289,7 @@ function planNext(input: BuildPlanInput, io: InjectIO): Plan {
 
 function planSvelteKit(input: BuildPlanInput, io: InjectIO): Plan {
   const target = path.join(input.cwd, "src", "hooks.client.ts");
-  const block = clientInitSnippet(input.endpoint, input.apiKey);
+  const block = clientInitSnippet(input.endpoint, keyExprFor(input.recipe)!);
   if (io.exists(target)) {
     return prependWithPreflight(input, io, target, block);
   }
@@ -335,7 +306,7 @@ function planNuxt(input: BuildPlanInput, io: InjectIO): Plan {
     ? path.join(cwd, "app")
     : cwd;
   const target = path.join(baseDir, "plugins", "crumbtrail.client.ts");
-  const block = nuxtPluginSnippet(input.endpoint, input.apiKey);
+  const block = nuxtPluginSnippet(input.endpoint, keyExprFor(input.recipe)!);
   if (io.exists(target)) {
     const existing = io.readFile(target);
     if (existing && referencesCrumbtrail(existing)) return skipPlan(input);
@@ -348,7 +319,7 @@ function planNuxt(input: BuildPlanInput, io: InjectIO): Plan {
 }
 
 function planVite(input: BuildPlanInput, io: InjectIO): Plan {
-  const block = clientInitSnippet(input.endpoint, input.apiKey);
+  const block = clientInitSnippet(input.endpoint, keyExprFor(input.recipe)!);
   if (!input.entryFile) {
     return fallbackPlan(input, block, [
       "Could not resolve the Vite entry from index.html — wire it manually.",
@@ -359,10 +330,11 @@ function planVite(input: BuildPlanInput, io: InjectIO): Plan {
 
 /**
  * Shared backend-JS plan builder. Express, Hono, Fastify, and the generic Node
- * recipe all inject the same self-contained `autoCapture` block (the
- * only prepend-safe server snippet — no `app` handle is available at the top of
- * a file) plus the `.env` `CRUMBTRAIL_KEY` action. Framework-specific middleware
- * wiring is left to `buildAgentPrompt`, which reads the registry stack.
+ * recipe all inject the same self-contained `autoCapture` block (the only
+ * prepend-safe server snippet — no `app` handle is available at the top of a
+ * file). The block reads the key from process.env.CRUMBTRAIL_KEY, which the user
+ * sets themselves (hands-off — the installer writes no key). Framework-specific
+ * middleware wiring is left to `buildAgentPrompt`, which reads the registry stack.
  *
  * The one snippet divergence is Nest: its scaffold ships a `.prettierrc` with
  * `singleQuote: true`, so it gets the single-quoted `nestInitSnippet` to avoid
@@ -374,28 +346,13 @@ function planNode(input: BuildPlanInput, io: InjectIO): Plan {
     input.recipe === "nestjs"
       ? nestInitSnippet(input.endpoint)
       : nodeInitSnippet(input.endpoint);
-  const { action, warning } = buildEnvAction(input.cwd, input.apiKey, io);
-  const envWarnings = warning ? [warning] : [];
 
   if (!input.entryFile) {
-    return fallbackPlan(
-      input,
-      block,
-      [
-        "Could not resolve the Node server entry — wire it manually.",
-        ...envWarnings,
-      ],
-      action,
-    );
+    return fallbackPlan(input, block, [
+      "Could not resolve the Node server entry — wire it manually.",
+    ]);
   }
-  return prependWithPreflight(
-    input,
-    io,
-    input.entryFile,
-    block,
-    envWarnings,
-    action,
-  );
+  return prependWithPreflight(input, io, input.entryFile, block);
 }
 
 /**
@@ -405,7 +362,7 @@ function planNode(input: BuildPlanInput, io: InjectIO): Plan {
  * <RemixBrowser> and break hydration (a deliberate divergence from planNext).
  */
 function planRemix(input: BuildPlanInput, io: InjectIO): Plan {
-  const block = clientInitSnippet(input.endpoint, input.apiKey);
+  const block = clientInitSnippet(input.endpoint, keyExprFor(input.recipe)!);
   if (!input.entryFile) {
     return fallbackPlan(input, block, [
       "Could not resolve app/entry.client.* — on a React Router 7 default template the client entry is hidden, so run `npx react-router reveal` to unhide app/entry.client.tsx (and entry.server.tsx), then re-run the wizard. Otherwise add the snippet to your Remix client entry manually (do not let the CLI create it; it would omit hydrateRoot).",
@@ -421,7 +378,7 @@ function planRemix(input: BuildPlanInput, io: InjectIO): Plan {
  * guidance, not an apology.
  */
 function planAstro(input: BuildPlanInput, _io: InjectIO): Plan {
-  const block = clientInitSnippet(input.endpoint, input.apiKey);
+  const block = clientInitSnippet(input.endpoint, keyExprFor(input.recipe)!);
   return fallbackPlan(input, block, [
     "Astro has no single client entry — add this snippet inside a client-side <script> in a shared layout (e.g. src/layouts/*.astro) so it runs on every page.",
   ]);
@@ -432,18 +389,19 @@ function planAstro(input: BuildPlanInput, _io: InjectIO): Plan {
  * `bootstrapApplication`/`platformBrowserDynamic` call in the resolved
  * `src/main.ts`; fall back when the entry is unresolved.
  */
-function planAngular(input: BuildPlanInput, io: InjectIO): Plan {
-  const block = clientInitSnippet(input.endpoint, input.apiKey);
-  if (!input.entryFile) {
-    return fallbackPlan(input, block, [
-      "Could not resolve the Angular entry (src/main.ts) — wire it manually.",
-    ]);
-  }
-  return prependWithPreflight(input, io, input.entryFile, block);
+function planAngular(input: BuildPlanInput, _io: InjectIO): Plan {
+  // A standard Angular browser build exposes neither import.meta.env nor
+  // process.env, so there is no hands-off env var to read (hence no keyRef in the
+  // registry). Emit guidance to add the key to environment.ts and wire it by hand
+  // rather than injecting code that would reference an undefined variable.
+  const block = clientInitSnippet(input.endpoint, "environment.crumbtrailKey");
+  return fallbackPlan(input, block, [
+    "Angular has no browser-safe env-var mechanism — add `crumbtrailKey: '<your-ingest-key>'` to src/environments/environment.ts (get your key from the dashboard), import `environment`, and prepend the snippet above bootstrapApplication in src/main.ts.",
+  ]);
 }
 
 function planReactNative(input: BuildPlanInput, io: InjectIO): Plan {
-  const block = reactNativeInitSnippet(input.endpoint, input.apiKey);
+  const block = reactNativeInitSnippet(input.endpoint, keyExprFor(input.recipe)!);
   if (!input.entryFile) {
     return fallbackPlan(input, block, [
       "Could not resolve the React Native entry (App/_layout/index) — wire it manually.",
@@ -487,9 +445,11 @@ function planTauri(input: BuildPlanInput, io: InjectIO): Plan {
  */
 function planOtlp(input: BuildPlanInput): Plan {
   const stack: Stack = input.stack ?? RECIPE_REGISTRY[input.recipe].stack;
+  // Hands-off: the guidance carries a placeholder the user replaces with the key
+  // they mint in the dashboard, never a live minted key.
   const otlp = buildOtlpSnippets({
     endpoint: input.endpoint,
-    apiKey: input.apiKey,
+    apiKey: KEY_PLACEHOLDER,
   });
   const snippet = [
     otlp.env,
@@ -508,7 +468,7 @@ function planOtlp(input: BuildPlanInput): Plan {
     snippet,
     agentPrompt: buildAgentPrompt(stack, {
       endpoint: input.endpoint,
-      apiKey: input.apiKey,
+      apiKey: KEY_PLACEHOLDER,
     }),
     warnings: [],
   };
@@ -524,6 +484,18 @@ export function buildPlan(
   input: BuildPlanInput,
   io: InjectIO = defaultInjectIO,
 ): Plan {
+  const plan = dispatchPlan(input, io);
+  // Stamp the env var the injected code reads its key from, so the wizard can
+  // print "set <VAR> in .env — get your key from the dashboard". Undefined for
+  // recipes that inject no key (tauri / otlp / angular) or when already wired.
+  const envVar = RECIPE_REGISTRY[input.recipe].keyRef?.envVar;
+  if (envVar && plan.kind !== "skip-already-wired") {
+    plan.keyEnvVar = envVar;
+  }
+  return plan;
+}
+
+function dispatchPlan(input: BuildPlanInput, io: InjectIO): Plan {
   // Project-level idempotency runs first for every recipe.
   if (projectAlreadyWired(input.cwd, io)) {
     return skipPlan(input);

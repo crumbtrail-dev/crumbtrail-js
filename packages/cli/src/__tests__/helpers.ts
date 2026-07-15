@@ -66,7 +66,6 @@ export function fakeInjectIO(
       const dirty = (opts.dirty ?? []).includes(target);
       return { isRepo: true, tracked: true, dirty };
     },
-    readGitignore: () => opts.gitignore ?? null,
   };
 }
 

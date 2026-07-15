@@ -7,7 +7,6 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import path from "node:path";
 
 export interface GitTargetStatus {
   /** false when `cwd` is not inside a git work tree. */
@@ -25,8 +24,6 @@ export interface InjectIO {
   readFile(p: string): string | null;
   /** git porcelain status for a single target path. */
   gitStatus(cwd: string, target: string): GitTargetStatus;
-  /** `.gitignore` contents at `cwd`, or null when absent. */
-  readGitignore(cwd: string): string | null;
 }
 
 function realGitStatus(cwd: string, target: string): GitTargetStatus {
@@ -70,29 +67,4 @@ export const defaultInjectIO: InjectIO = {
     }
   },
   gitStatus: realGitStatus,
-  /**
-   * Every .gitignore from `cwd` up to (and including) the git root, concatenated.
-   *
-   * Walking up is what makes this correct in a monorepo: `.env` is almost always
-   * ignored by the ROOT .gitignore, not by `packages/api/.gitignore` — and a
-   * package-local-only read would tell every service in the repo that its ingest
-   * key is about to be committed when it isn't.
-   */
-  readGitignore: (cwd) => {
-    const parts: string[] = [];
-    let dir = path.resolve(cwd);
-    while (true) {
-      try {
-        parts.push(readFileSync(path.join(dir, ".gitignore"), "utf8"));
-      } catch {
-        // No .gitignore at this level — keep climbing.
-      }
-      // Stop at the repo root; beyond it, ignore rules no longer apply to us.
-      if (existsSync(path.join(dir, ".git"))) break;
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    return parts.length > 0 ? parts.join("\n") : null;
-  },
 };

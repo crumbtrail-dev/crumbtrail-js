@@ -8,7 +8,6 @@ import type { Plan } from "../inject/types";
 import { cleanup, gitInit, makeTmpRepo, memExecutorIO } from "./helpers";
 
 const ENDPOINT = "https://ingest.example.com";
-const KEY = "bl_ingest_abc123";
 
 describe("executePlan — golden create/prepend on a real repo", () => {
   const roots: string[] = [];
@@ -25,7 +24,7 @@ describe("executePlan — golden create/prepend on a real repo", () => {
   it("creates a SvelteKit hooks.client.ts and is then idempotent on re-run", () => {
     const root = tmp({ "package.json": "{}", "src/app.d.ts": "" });
     const plan = buildPlan(
-      { cwd: root, recipe: "sveltekit", endpoint: ENDPOINT, apiKey: KEY },
+      { cwd: root, recipe: "sveltekit", endpoint: ENDPOINT },
       defaultInjectIO,
     );
     expect(plan.kind).toBe("create");
@@ -35,12 +34,17 @@ describe("executePlan — golden create/prepend on a real repo", () => {
       path.join(root, "src", "hooks.client.ts"),
       "utf8",
     );
-    expect(written).toContain(`httpAuthToken: "${KEY}"`);
+    // Hands-off: the written file reads the key from the Vite env var, never a
+    // baked-in literal.
+    expect(written).toContain(
+      "httpAuthToken: import.meta.env.VITE_CRUMBTRAIL_KEY",
+    );
+    expect(written).not.toMatch(/ctkey_|bgk_|bl_ingest_/);
     expect(written.endsWith("\n")).toBe(true);
 
     // Re-detect after writing the file -> target now references crumbtrail -> skip.
     const second = buildPlan(
-      { cwd: root, recipe: "sveltekit", endpoint: ENDPOINT, apiKey: KEY },
+      { cwd: root, recipe: "sveltekit", endpoint: ENDPOINT },
       defaultInjectIO,
     );
     expect(second.kind).toBe("skip-already-wired");
@@ -57,7 +61,6 @@ describe("executePlan — golden create/prepend on a real repo", () => {
         cwd: root,
         recipe: "node",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: path.join(root, "server.js"),
       },
       defaultInjectIO,
@@ -67,13 +70,12 @@ describe("executePlan — golden create/prepend on a real repo", () => {
     const out = readFileSync(path.join(root, "server.js"), "utf8");
     expect(out.startsWith("#!/usr/bin/env node\n")).toBe(true);
     expect(out).toContain('import("crumbtrail-node")');
+    expect(out).toContain("process.env.CRUMBTRAIL_KEY");
     expect(out.indexOf("crumbtrail-node")).toBeLessThan(
       out.indexOf("const app"),
     );
-    // .env created with the key
-    expect(readFileSync(path.join(root, ".env"), "utf8")).toContain(
-      `CRUMBTRAIL_KEY=${KEY}`,
-    );
+    // Hands-off: the installer writes NOTHING to .env — the user sets the key.
+    expect(existsSync(path.join(root, ".env"))).toBe(false);
   });
 
   it("refuses to touch a dirty target until confirmed", () => {
@@ -88,7 +90,6 @@ describe("executePlan — golden create/prepend on a real repo", () => {
         cwd: root,
         recipe: "node",
         endpoint: ENDPOINT,
-        apiKey: KEY,
         entryFile: path.join(root, "server.js"),
       },
       defaultInjectIO,
@@ -158,40 +159,22 @@ describe("executePlan — non-writing plans", () => {
 });
 
 describe("executePlan — all-or-nothing rollback", () => {
-  it("restores the pre-image when a later write fails", () => {
+  // The installer is hands-off: a plan now produces exactly ONE file op (no more
+  // paired .env write), so rollback is exercised on that single create op. When
+  // the write throws, a brand-new file must not be left behind.
+  it("leaves no partial file when the create write fails", () => {
     const target = "/proj/instrumentation-client.ts";
-    const envPath = "/proj/.env";
     const plan: Plan = {
-      recipe: "node",
+      recipe: "next",
       kind: "create",
       targetPath: target,
       content: 'import "crumbtrail-core";\n',
       warnings: [],
-      envAction: { targetPath: envPath, line: `CRUMBTRAIL_KEY=${KEY}` },
     };
-    // Fail on the .env write (the second op) — the created file must be removed.
-    const { io, files } = memExecutorIO({}, envPath);
+    // Fail on the create write — the (never-existed) file must be rolled back.
+    const { io, files } = memExecutorIO({}, target);
     expect(() => executePlan(plan, io)).toThrow(/boom/);
     expect(files[target]).toBeUndefined(); // rolled back (never existed)
-    expect(files[envPath]).toBeUndefined();
-  });
-
-  it("restores prior content of an existing file on failure", () => {
-    const target = "/proj/server.js";
-    const envPath = "/proj/.env";
-    const original = "const app = start();\n";
-    const plan: Plan = {
-      recipe: "node",
-      kind: "prepend",
-      targetPath: target,
-      content: 'import("crumbtrail-node");',
-      warnings: [],
-      envAction: { targetPath: envPath, line: `CRUMBTRAIL_KEY=${KEY}` },
-    };
-    const { io, files } = memExecutorIO({ [target]: original }, envPath);
-    expect(() => executePlan(plan, io)).toThrow(/boom/);
-    // server.js prepended then rolled back byte-for-byte
-    expect(files[target]).toBe(original);
   });
 });
 
