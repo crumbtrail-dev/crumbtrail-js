@@ -25,8 +25,17 @@ import {
   canUseBrowser,
   clearAuth as clearStoredAuth,
   ensureToken,
+  loadAuth,
   openBrowser,
 } from "./auth";
+import {
+  exitCodeFor,
+  runPreflight,
+  toJson,
+  type AuthProbe,
+  type PreflightResult,
+  type StageResult,
+} from "./preflight";
 import {
   inferProjectName,
   inferServiceName,
@@ -77,7 +86,13 @@ function __dirnameCompat(): string {
 
 // ── Arg parsing ──────────────────────────────────────────────────────────────
 
-export type Command = "wizard" | "login" | "logout" | "help" | "version";
+export type Command =
+  | "wizard"
+  | "login"
+  | "logout"
+  | "verify"
+  | "help"
+  | "version";
 
 export interface ParsedArgs {
   command: Command;
@@ -100,6 +115,13 @@ export interface ParsedArgs {
    * (resolved relative to cwd; must exist and hold a package.json).
    */
   workspace?: string;
+  /**
+   * `verify` only: the ingest key to probe with (else $CRUMBTRAIL_KEY, else the
+   * cached login token). The primary CI credential for a pre-deploy check.
+   */
+  key?: string;
+  /** `verify` only: emit a machine-readable JSON result instead of the human table. */
+  json: boolean;
   /** Non-flag/subcommand leftover — an unknown token triggers usage help. */
   unknown?: string;
 }
@@ -112,6 +134,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     noBrowser: false,
     skipVerify: false,
     all: false,
+    json: false,
   };
   let commandSet = false;
   for (let i = 0; i < args.length; i++) {
@@ -141,6 +164,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--endpoint":
         parsed.endpoint = args[++i];
         break;
+      case "--key":
+        parsed.key = args[++i];
+        break;
+      case "--json":
+        parsed.json = true;
+        break;
       case "--all":
         parsed.all = true;
         break;
@@ -155,11 +184,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
           parsed.project = a.slice("--project=".length);
         } else if (a.startsWith("--endpoint=")) {
           parsed.endpoint = a.slice("--endpoint=".length);
+        } else if (a.startsWith("--key=")) {
+          parsed.key = a.slice("--key=".length);
         } else if (a.startsWith("--only=")) {
           (parsed.only ??= []).push(a.slice("--only=".length));
         } else if (a.startsWith("--workspace=")) {
           parsed.workspace = a.slice("--workspace=".length);
-        } else if (!commandSet && (a === "login" || a === "logout")) {
+        } else if (
+          !commandSet &&
+          (a === "login" || a === "logout" || a === "verify")
+        ) {
           parsed.command = a;
           commandSet = true;
         } else if (!a.startsWith("-")) {
@@ -178,6 +212,7 @@ Usage:
   crumbtrail [options]        Run the setup wizard (detect → login → wire → verify)
   crumbtrail login            Log in and cache a token, nothing else
   crumbtrail logout           Delete the cached token
+  crumbtrail verify           Preflight an endpoint + key (DNS, TLS, auth) — PASS/FAIL
 
 In a monorepo, run it from the repo root: it scans every workspace and service,
 shows you what it found, and wires the ones you pick.
@@ -193,7 +228,13 @@ Options:
   --skip-verify              Don't wait for the first event
   --endpoint <url>           Cloud endpoint (else $CRUMBTRAIL_BASE_URL, else default)
   --help, -h                 Show this help
-  --version, -v              Print the version`;
+  --version, -v              Print the version
+
+verify options (pre-deploy check — point it at any environment):
+  --endpoint <url>           Endpoint to probe (else $CRUMBTRAIL_BASE_URL, else default)
+  --key <ingestKey>          Ingest key to probe with (else $CRUMBTRAIL_KEY, else cached login)
+  --project <id>             Project id for the auth GET fallback (no key)
+  --json                     Emit a machine-readable result (exit 0 = pass, non-0 = fail)`;
 
 // ── SDK install ──────────────────────────────────────────────────────────────
 
@@ -353,6 +394,8 @@ export interface WizardDeps {
   resolveProject: typeof resolveProject;
   provisionService: typeof provisionService;
   pollForServices: typeof pollForServices;
+  /** Synthetic preflight for `verify` (stub in tests). */
+  runPreflight: typeof runPreflight;
   /** Browser opener for the end-of-wizard dashboard hand-off (stub in tests). */
   openBrowserFn?: (url: string) => Promise<boolean>;
   ui: Ui;
@@ -376,6 +419,7 @@ export function defaultDeps(): WizardDeps {
     resolveProject,
     provisionService,
     pollForServices,
+    runPreflight,
     openBrowserFn: openBrowser,
     ui: consoleUi,
     prompter: stdinPrompter,
@@ -1421,6 +1465,74 @@ function runLogout(deps: WizardDeps): number {
   return 0;
 }
 
+// ── verify subcommand (synthetic preflight) ──────────────────────────────────
+
+/**
+ * Pick the credential the preflight auth stage probes with. An explicit --key
+ * (or $CRUMBTRAIL_KEY) is the primary CI path — it exercises the SDK's ingest
+ * path. Absent a key we fall back to the cached login token, but only if it was
+ * minted for THIS endpoint (a token is only reused for its base). Nothing → the
+ * auth stage reports a clear "no credential" failure.
+ */
+export function resolveAuthProbe(
+  base: string,
+  key: string | undefined,
+  projectId: string | undefined,
+  env: NodeJS.ProcessEnv,
+): AuthProbe {
+  const explicit = (key && key.trim()) || (env.CRUMBTRAIL_KEY && env.CRUMBTRAIL_KEY.trim());
+  if (explicit) return { kind: "ingestKey", key: explicit };
+  const stored = loadAuth(env);
+  if (stored && stored.token && stored.endpoint === base) {
+    return { kind: "bearer", token: stored.token, projectId };
+  }
+  return { kind: "none" };
+}
+
+const STAGE_GLYPH: Record<StageResult["status"], string> = {
+  pass: color.green("✓"),
+  fail: color.red("✗"),
+  skipped: color.yellow("○"),
+};
+
+const STAGE_LABEL: Record<StageResult["stage"], string> = {
+  dns: "DNS ",
+  tls: "TLS ",
+  auth: "Auth",
+};
+
+function renderPreflight(result: PreflightResult, ui: Ui): void {
+  ui.out("");
+  ui.out(`${color.bold("Crumbtrail preflight")} → ${result.endpoint}`);
+  ui.out("");
+  for (const s of result.stages) {
+    const ms = s.status === "skipped" ? "" : color.dim(`(${s.ms}ms)`);
+    ui.out(`  ${STAGE_GLYPH[s.status]} ${STAGE_LABEL[s.stage]}  ${s.reason} ${ms}`.trimEnd());
+  }
+  ui.out("");
+  ui.out(
+    result.ok
+      ? `${color.green("PASS")} — endpoint and key are reachable and authenticated`
+      : `${color.red("FAIL")} — fix the failing stage above before deploying`,
+  );
+}
+
+async function runVerify(parsed: ParsedArgs, deps: WizardDeps): Promise<number> {
+  const base = resolveEndpoint(parsed.endpoint, deps.env);
+  const probe = resolveAuthProbe(base, parsed.key, parsed.project, deps.env);
+  const result = await deps.runPreflight({
+    endpoint: base,
+    probe,
+    fetchImpl: deps.fetchImpl,
+  });
+  if (parsed.json) {
+    deps.ui.out(JSON.stringify(toJson(result)));
+  } else {
+    renderPreflight(result, deps.ui);
+  }
+  return exitCodeFor(result);
+}
+
 // ── Entry ────────────────────────────────────────────────────────────────────
 
 export async function runCli(
@@ -1444,6 +1556,9 @@ export async function runCli(
   }
   if (parsed.command === "login") return runLogin(parsed, deps);
   if (parsed.command === "logout") return runLogout(deps);
+  // `verify` is non-interactive by design (no prompts, no browser) so it runs
+  // before the TTY guard — pointing it at prod from CI is the whole point.
+  if (parsed.command === "verify") return runVerify(parsed, deps);
 
   // Non-TTY guard — BEFORE any prompt. CI must pass --yes AND --project.
   if (!deps.isTTY && !(parsed.yes && parsed.project)) {
