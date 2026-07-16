@@ -778,7 +778,10 @@ describe("end-to-end session", () => {
         startedContexts: 1,
         limitedContexts: 1,
       },
-      failedReqs: [expect.objectContaining({ m: "POST", st: 502 })],
+      failedReqs: [
+        expect.objectContaining({ m: "POST", st: 502 }),
+        expect.objectContaining({ m: "GET", st: 0, reason: "network_error" }),
+      ],
       networkErrors: [
         expect.objectContaining({
           method: "GET",
@@ -846,6 +849,11 @@ describe("end-to-end session", () => {
         }),
         failedRequests: [
           expect.objectContaining({ method: "POST", status: 502 }),
+          expect.objectContaining({
+            method: "GET",
+            status: 0,
+            reason: "network_error",
+          }),
         ],
         networkErrors: [
           expect.objectContaining({

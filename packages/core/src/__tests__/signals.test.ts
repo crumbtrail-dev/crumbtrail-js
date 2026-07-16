@@ -173,6 +173,105 @@ describe("retryStormDetector", () => {
     expect(signals).toHaveLength(0);
   });
 
+  it("trips on repeated network failures (net.err) to the same endpoint", () => {
+    const d = retryStormDetector({
+      threshold: 5,
+      windowMs: 2000,
+      failThreshold: 2,
+    });
+    const signals = run(d, [
+      evt("net.req", { id: 1, method: "POST", url: "/api/save" }, 0),
+      evt(
+        "net.err",
+        { id: 1, method: "POST", url: "/api/save", msg: "Failed to fetch" },
+        50,
+      ),
+      evt("net.req", { id: 2, method: "POST", url: "/api/save" }, 400),
+      evt(
+        "net.err",
+        { id: 2, method: "POST", url: "/api/save", msg: "Failed to fetch" },
+        450,
+      ),
+    ]);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].tag).toBe("auto:retry-storm");
+  });
+
+  it("counts a mix of failed responses and network failures against one endpoint", () => {
+    const d = retryStormDetector({
+      threshold: 5,
+      windowMs: 2000,
+      failThreshold: 2,
+    });
+    const signals = run(d, [
+      evt("net.req", { id: 1, method: "POST", url: "/api/save" }, 0),
+      evt("net.res", { id: 1, st: 502, dur: 10 }, 50),
+      evt("net.req", { id: 2, method: "POST", url: "/api/save" }, 400),
+      evt(
+        "net.err",
+        { id: 2, method: "POST", url: "/api/save", msg: "Failed to fetch" },
+        450,
+      ),
+    ]);
+    expect(signals).toHaveLength(1);
+  });
+
+  it("keys a net.err by its own method/url when the request was never seen", () => {
+    const d = retryStormDetector({
+      threshold: 5,
+      windowMs: 2000,
+      failThreshold: 2,
+    });
+    const signals = run(d, [
+      evt(
+        "net.err",
+        { id: 7, method: "GET", url: "/api/x?t=1", msg: "Failed to fetch" },
+        0,
+      ),
+      evt(
+        "net.err",
+        { id: 8, method: "GET", url: "/api/x?t=2", msg: "Failed to fetch" },
+        300,
+      ),
+    ]);
+    expect(signals).toHaveLength(1);
+  });
+
+  it("does not count aborted requests toward the failure threshold", () => {
+    const d = retryStormDetector({
+      threshold: 5,
+      windowMs: 2000,
+      failThreshold: 2,
+    });
+    const signals = run(d, [
+      evt("net.req", { id: 1, method: "GET", url: "/api/search" }, 0),
+      evt(
+        "net.err",
+        {
+          id: 1,
+          method: "GET",
+          url: "/api/search",
+          msg: "aborted",
+          name: "AbortError",
+        },
+        50,
+      ),
+      evt("net.req", { id: 2, method: "GET", url: "/api/search" }, 400),
+      evt(
+        "net.err",
+        {
+          id: 2,
+          method: "GET",
+          url: "/api/search",
+          msg: "aborted",
+          name: "AbortError",
+        },
+        450,
+      ),
+    ]);
+    expect(signals).toHaveLength(0);
+  });
+
   it("releases a request id after its response, so a stale duplicate response no longer correlates", () => {
     const d = retryStormDetector({
       threshold: 5,

@@ -223,7 +223,7 @@ interface SessionIndex {
   end: number;
   dur: number;
   evts: number;
-  errs: Array<{ t: number; msg: string }>;
+  errs: Array<{ t: number; msg: string; method?: string; url?: string }>;
   failedReqs: Array<{
     t: number;
     m: string;
@@ -298,6 +298,7 @@ export async function postProcess(
 
   const errs: SessionIndex["errs"] = [];
   const failedReqs: SessionIndex["failedReqs"] = [];
+  const recentNetErrs: Array<{ t: number; m: string; url: string }> = [];
   const networkErrors: NetworkErrorIndexEntry[] = [];
   const consoleErrors: ConsoleErrorIndexEntry[] = [];
   const navs: SessionIndex["navs"] = [];
@@ -320,7 +321,17 @@ export async function postProcess(
     }
 
     if (event.k === "err" || event.k === "rej") {
-      errs.push({ t: event.t, msg: safeDiagnosticString(event.d.msg) ?? "" });
+      const msg = safeDiagnosticString(event.d.msg) ?? "";
+      const entry: SessionIndex["errs"][number] = { t: event.t, msg };
+      // A fetch network failure surfaces twice: as a net.err and, when uncaught,
+      // as a rejection moments later. Attach the request identity to the error
+      // entry so the failing URL is visible from the error itself.
+      const linked = isNetworkFailureMessage(msg)
+        ? findRecentNetworkFailure(recentNetErrs, event.t)
+        : undefined;
+      if (linked?.m) entry.method = linked.m;
+      if (linked?.url) entry.url = linked.url;
+      errs.push(entry);
     }
 
     if (event.k === "net.req") {
@@ -345,6 +356,28 @@ export async function postProcess(
     if (event.k === "net.err") {
       const networkError = summarizeNetworkErrorEvent(event);
       if (networkError) networkErrors.push(networkError);
+
+      // SDK-observed network failures count as failed requests (st 0, no HTTP
+      // response). Aborts are routine cancellations and page-probe events are
+      // page-world-untrusted corroboration, so neither counts.
+      if (isCountableNetworkFailure(event)) {
+        const req = netReqs.get(String(event.d.id));
+        const method =
+          safeString(event.d.method) ?? safeString(event.d.m) ?? req?.m ?? "";
+        const url = safeUrl(event.d.url) ?? req?.url ?? "";
+        const message = safeDiagnosticString(event.d.msg);
+        failedReqs.push({
+          t: event.t,
+          m: method,
+          url,
+          st: 0,
+          reason: "network_error",
+          ...(message !== undefined ? { message } : {}),
+        });
+        recentNetErrs.push({ t: event.t, m: method, url });
+        if (recentNetErrs.length > RECENT_NETWORK_FAILURES_MAX)
+          recentNetErrs.shift();
+      }
     }
 
     if (isNavigationEvent(event)) {
@@ -600,6 +633,40 @@ function consoleMessage(data: Record<string, unknown>): string | undefined {
     )
     .join(" ");
   return safeDiagnosticString(text);
+}
+
+/** How far back a rejection can look to claim a network failure as its cause. */
+const NETWORK_FAILURE_REJ_WINDOW_MS = 2000;
+const RECENT_NETWORK_FAILURES_MAX = 20;
+
+/** Browser/runtime phrasings of a fetch/XHR network-level failure. */
+const NETWORK_FAILURE_MESSAGE = /failed to fetch|networkerror|network error|load failed|network request failed|fetch failed/i;
+
+function isNetworkFailureMessage(msg: string): boolean {
+  return NETWORK_FAILURE_MESSAGE.test(msg);
+}
+
+function findRecentNetworkFailure(
+  recent: Array<{ t: number; m: string; url: string }>,
+  at: number,
+): { t: number; m: string; url: string } | undefined {
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const candidate = recent[i];
+    if (candidate.t > at) continue;
+    if (at - candidate.t > NETWORK_FAILURE_REJ_WINDOW_MS) return undefined;
+    return candidate;
+  }
+  return undefined;
+}
+
+/** Aborts are routine cancellations; page-probe events are page-world-untrusted. */
+function isCountableNetworkFailure(event: BugEvent): boolean {
+  return (
+    event.k === "net.err" &&
+    event.d.name !== "AbortError" &&
+    event.d.source !== "page-probe" &&
+    event.d.evidenceTrust !== "page-world-untrusted"
+  );
 }
 
 function summarizeNetworkErrorEvent(

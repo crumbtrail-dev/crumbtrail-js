@@ -1061,12 +1061,16 @@ export class Crumbtrail {
 
 /**
  * Error-class events that justify flushing ahead of the batch interval:
- * uncaught errors, unhandled promise rejections, and failed network
- * responses (HTTP >= 400 or an application-failure body).
+ * uncaught errors, unhandled promise rejections, failed network
+ * responses (HTTP >= 400 or an application-failure body), and network-level
+ * request failures (except aborts, which are routine cancellations).
  */
 function isSevereEvent(event: BugEvent): boolean {
   return (
-    event.k === "err" || event.k === "rej" || isFailedNetworkResponse(event)
+    event.k === "err" ||
+    event.k === "rej" ||
+    isFailedNetworkResponse(event) ||
+    (event.k === "net.err" && event.d.name !== "AbortError")
   );
 }
 

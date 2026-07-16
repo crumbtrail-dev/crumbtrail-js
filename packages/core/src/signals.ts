@@ -216,14 +216,25 @@ export function retryStormDetector(opts: RetryStormOptions): SignalDetector {
         return null;
       }
 
-      if (event.k === "net.res") {
+      if (event.k === "net.res" || event.k === "net.err") {
         // Correlate the response to its endpoint, then release the id — the request is no longer
         // in flight, so retaining it would grow the map by one entry per request over the session.
         const id = typeof event.d.id === "number" ? event.d.id : undefined;
-        const key = id !== undefined ? endpointOf.get(id) : undefined;
+        let key = id !== undefined ? endpointOf.get(id) : undefined;
         if (id !== undefined) endpointOf.delete(id);
-        const st = typeof event.d.st === "number" ? event.d.st : 0;
-        if (st < 400) return null;
+
+        if (event.k === "net.res") {
+          const st = typeof event.d.st === "number" ? event.d.st : 0;
+          if (st < 400) return null;
+        } else {
+          // Aborts are routine (typeahead cancels, navigation) — not a failing endpoint.
+          if (event.d.name === "AbortError") return null;
+          // net.err carries its own method/url, so it can key an endpoint even when
+          // the request event was never seen (e.g. it aged out of the id map).
+          if (!key && typeof event.d.url === "string")
+            key = endpointKey(event.d.method, event.d.url);
+        }
+
         if (!key) return null;
         const arr = slide(failHits.get(key), event.t, opts.windowMs);
         if (arr.length >= failThreshold) {

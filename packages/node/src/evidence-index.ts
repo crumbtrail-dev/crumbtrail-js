@@ -215,6 +215,10 @@ export function buildEvidenceCandidates(
   }
 
   for (const failed of index.failedReqs ?? []) {
+    // Network-level failures (no HTTP response) are counted in failedReqs but
+    // already surface as network_error candidates via index.networkErrors —
+    // an "HTTP 0" candidate here would double-count the same failure.
+    if (failed.reason === "network_error") continue;
     const response = findResponseEvent(
       responseByTimeStatus,
       failed.t,

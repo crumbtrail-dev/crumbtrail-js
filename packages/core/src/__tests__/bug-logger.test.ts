@@ -749,6 +749,58 @@ describe("Crumbtrail", () => {
       await logger.stop();
     });
 
+    it("treats network failures (net.err) as severe", async () => {
+      vi.useFakeTimers();
+      const mockTransport = makeMockTransport();
+      const logger = Crumbtrail.init({
+        transportInstance: mockTransport as any,
+        flushIntervalMs: 5000,
+        flushBufferSize: 1000,
+      });
+
+      logger.addEvent({
+        type: "net.err",
+        data: { id: 1, method: "GET", url: "/api/x", msg: "Failed to fetch" },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockTransport.sendEvents).toHaveBeenCalledTimes(1);
+      expect(mockTransport.sendEvents.mock.calls[0][0]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ k: "net.err" }),
+        ]),
+      );
+
+      vi.useRealTimers();
+      await logger.stop();
+    });
+
+    it("does not treat aborted requests (net.err AbortError) as severe", async () => {
+      vi.useFakeTimers();
+      const mockTransport = makeMockTransport();
+      const logger = Crumbtrail.init({
+        transportInstance: mockTransport as any,
+        flushIntervalMs: 5000,
+        flushBufferSize: 1000,
+      });
+
+      logger.addEvent({
+        type: "net.err",
+        data: {
+          id: 1,
+          method: "GET",
+          url: "/api/x",
+          msg: "aborted",
+          name: "AbortError",
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockTransport.sendEvents).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+      await logger.stop();
+    });
+
     it("keeps batching benign events on the interval", async () => {
       vi.useFakeTimers();
       const mockTransport = makeMockTransport();

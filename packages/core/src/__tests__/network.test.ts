@@ -136,6 +136,13 @@ class MockXHR {
       fn();
     }
   }
+
+  _abort() {
+    this.status = 0;
+    for (const fn of this._listeners["abort"] ?? []) {
+      fn();
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -964,7 +971,7 @@ describe("networkCollector — XHR", () => {
     cleanup();
   });
 
-  it("links XHR error response events with the request correlation IDs", () => {
+  it("links XHR failure events with the request correlation IDs", () => {
     const { events, bus, cleanup, sessionId } = collect({
       networkCorrelationHeaders: true,
     });
@@ -978,15 +985,14 @@ describe("networkCollector — XHR", () => {
     bus.flush();
 
     const req = events.find((e) => e.k === "net.req");
-    const res = events.find((e) => e.k === "net.res");
+    const err = events.find((e) => e.k === "net.err");
 
     expect(req!.d.sessionId).toBe(sessionId);
     expect(req!.d.requestId).toBe(
       mock.requestHeaders[CRUMBTRAIL_REQUEST_HEADER],
     );
-    expect(res!.d.st).toBe(0);
-    expect(res!.d.sessionId).toBe(req!.d.sessionId);
-    expect(res!.d.requestId).toBe(req!.d.requestId);
+    expect(err!.d.sessionId).toBe(req!.d.sessionId);
+    expect(err!.d.requestId).toBe(req!.d.requestId);
 
     cleanup();
   });
@@ -1013,7 +1019,7 @@ describe("networkCollector — XHR", () => {
     cleanup();
   });
 
-  it("handles XHR error events", () => {
+  it("emits net.err (not net.res) for XHR error events", () => {
     const { events, bus, cleanup } = collect();
 
     const xhr = new XMLHttpRequest();
@@ -1024,14 +1030,21 @@ describe("networkCollector — XHR", () => {
     mock._error();
     bus.flush();
 
-    const res = events.find((e) => e.k === "net.res");
-    expect(res).toBeDefined();
-    expect(res!.d.st).toBe(0);
+    const req = events.find((e) => e.k === "net.req");
+    const err = events.find((e) => e.k === "net.err");
+    expect(err).toBeDefined();
+    expect(err!.d.id).toBe(req!.d.id);
+    expect(err!.d.method).toBe("GET");
+    expect(err!.d.url).toBe("https://api.example.com/fail");
+    expect(err!.d.msg).toBe("network error");
+    expect(err!.d.transport).toBe("xhr");
+    expect(typeof err!.d.dur).toBe("number");
+    expect(events.filter((e) => e.k === "net.res")).toHaveLength(0);
 
     cleanup();
   });
 
-  it("handles XHR timeout events", () => {
+  it("emits net.err for XHR timeout events", () => {
     const { events, bus, cleanup } = collect();
 
     const xhr = new XMLHttpRequest();
@@ -1042,9 +1055,31 @@ describe("networkCollector — XHR", () => {
     mock._timeout();
     bus.flush();
 
-    const res = events.find((e) => e.k === "net.res");
-    expect(res).toBeDefined();
-    expect(res!.d.st).toBe(0);
+    const err = events.find((e) => e.k === "net.err");
+    expect(err).toBeDefined();
+    expect(err!.d.msg).toBe("request timed out");
+    expect(err!.d.name).toBe("TimeoutError");
+    expect(events.filter((e) => e.k === "net.res")).toHaveLength(0);
+
+    cleanup();
+  });
+
+  it("emits net.err with an AbortError marker for XHR abort events", () => {
+    const { events, bus, cleanup } = collect();
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "https://api.example.com/cancelled");
+    xhr.send();
+
+    const mock = MockXHR.instances[MockXHR.instances.length - 1];
+    mock._abort();
+    bus.flush();
+
+    const err = events.find((e) => e.k === "net.err");
+    expect(err).toBeDefined();
+    expect(err!.d.msg).toBe("request aborted");
+    expect(err!.d.name).toBe("AbortError");
+    expect(events.filter((e) => e.k === "net.res")).toHaveLength(0);
 
     cleanup();
   });
@@ -1082,6 +1117,92 @@ describe("networkCollector — XHR", () => {
     const res = events.find((e) => e.k === "net.res");
     expect(res).toBeDefined();
     expect(res!.d.body).toBeUndefined();
+
+    cleanup();
+  });
+});
+
+/* ================================================================== */
+/* Fetch failure tests                                                 */
+/* ================================================================== */
+
+describe("networkCollector — fetch failures", () => {
+  it("emits net.err and rethrows when fetch rejects", async () => {
+    const failure = new TypeError("Failed to fetch");
+    globalThis.fetch = vi.fn().mockRejectedValue(failure);
+    const { events, bus, cleanup } = collect();
+
+    await expect(
+      globalThis.fetch("https://api.example.com/data", { method: "POST" }),
+    ).rejects.toBe(failure);
+    bus.flush();
+
+    const req = events.find((e) => e.k === "net.req");
+    const err = events.find((e) => e.k === "net.err");
+    expect(err).toBeDefined();
+    expect(err!.d.id).toBe(req!.d.id);
+    expect(err!.d.method).toBe("POST");
+    expect(err!.d.url).toBe("https://api.example.com/data");
+    expect(err!.d.msg).toBe("Failed to fetch");
+    expect(err!.d.name).toBe("TypeError");
+    expect(err!.d.transport).toBe("fetch");
+    expect(typeof err!.d.dur).toBe("number");
+    expect(events.filter((e) => e.k === "net.res")).toHaveLength(0);
+
+    cleanup();
+  });
+
+  it("marks aborted fetches with the AbortError name", async () => {
+    const failure = new DOMException(
+      "The operation was aborted.",
+      "AbortError",
+    );
+    globalThis.fetch = vi.fn().mockRejectedValue(failure);
+    const { events, bus, cleanup } = collect();
+
+    await expect(
+      globalThis.fetch("https://api.example.com/cancelled"),
+    ).rejects.toBe(failure);
+    bus.flush();
+
+    const err = events.find((e) => e.k === "net.err");
+    expect(err).toBeDefined();
+    expect(err!.d.name).toBe("AbortError");
+
+    cleanup();
+  });
+
+  it("carries correlation IDs on net.err when header injection is enabled", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const { events, bus, cleanup, sessionId } = collect({
+      networkCorrelationHeaders: true,
+    });
+
+    await expect(
+      globalThis.fetch("https://api.example.com/data"),
+    ).rejects.toThrow("Failed to fetch");
+    bus.flush();
+
+    const req = events.find((e) => e.k === "net.req");
+    const err = events.find((e) => e.k === "net.err");
+    expect(err!.d.sessionId).toBe(sessionId);
+    expect(err!.d.requestId).toBe(req!.d.requestId);
+    expect(err!.d.requestId).toBeDefined();
+
+    cleanup();
+  });
+
+  it("redacts sensitive query params in the net.err url", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const { events, bus, cleanup } = collect();
+
+    await expect(
+      globalThis.fetch("https://api.example.com/data?token=supersecret"),
+    ).rejects.toThrow();
+    bus.flush();
+
+    const err = events.find((e) => e.k === "net.err");
+    expect(String(err!.d.url)).not.toContain("supersecret");
 
     cleanup();
   });

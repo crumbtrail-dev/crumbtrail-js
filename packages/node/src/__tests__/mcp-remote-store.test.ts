@@ -26,7 +26,20 @@ type SessionResponseMode =
   | "stalled"
   | "oversized";
 
-type ArtifactResponseMode = "normal" | "stalled";
+/**
+ * `stalled` writes headers and never ends. Note that node does not flush the
+ * header of a HEAD response until end(), so a HEAD against it never resolves
+ * at all, while a GET resolves at the headers and stalls on the body.
+ *
+ * `stalled-body` ends the HEAD immediately and stalls only the GET, which is
+ * the shape that exercises the stat's byteLength fallback: headers arrive with
+ * no size, and the body measure is what runs into the deadline.
+ */
+type ArtifactResponseMode =
+  | "normal"
+  | "stalled"
+  | "stalled-body"
+  | "unauthorized";
 
 /**
  * How the mock frames an artifact response.
@@ -41,6 +54,19 @@ type ArtifactResponseMode = "normal" | "stalled";
  */
 type ArtifactFraming = "chunked" | "content-length";
 
+/**
+ * Whether the mock cloud serves HEAD.
+ *
+ * `head` mirrors the current cloud, which answers HEAD wherever it answers GET
+ * and audits it as a stat instead of a read. `get-only` mirrors a cloud old
+ * enough to reject every non GET before auth, where the request fell through
+ * the route table and a HEAD came back 404 — the CT-006 shape, where "wrong
+ * method" is indistinguishable from "missing artifact". Both must work: the
+ * client is published and cannot assume the deployment it talks to has been
+ * upgraded.
+ */
+type HeadSupport = "head" | "get-only";
+
 interface MockCloud {
   baseUrl: string;
   requests: MockRequest[];
@@ -51,6 +77,7 @@ interface MockCloudOptions {
   sessionResponse?: SessionResponseMode;
   artifactResponse?: ArtifactResponseMode;
   artifactFraming?: ArtifactFraming;
+  headSupport?: HeadSupport;
 }
 
 const SESSION_ID = "sess_fixture";
@@ -118,6 +145,7 @@ function startMockCloud({
   sessionResponse = "normal",
   artifactResponse = "normal",
   artifactFraming = "chunked",
+  headSupport = "head",
 }: MockCloudOptions = {}): Promise<MockCloud> {
   const requests: MockRequest[] = [];
   const sockets = new Set<Socket>();
@@ -128,6 +156,15 @@ function startMockCloud({
       path: `${url.pathname}${url.search}`,
       authorization: req.headers.authorization,
     });
+
+    // An old cloud rejected the method before it ever looked at the route, so
+    // the 404 carries no hint that HEAD was the problem. Reproduce that exactly
+    // rather than a tidier 405, because the tidier shape is not what shipped.
+    if (req.method === "HEAD" && headSupport === "get-only") {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
 
     if (url.pathname === "/api/agent/sessions") {
       if (sessionResponse === "unauthorized") {
@@ -189,6 +226,11 @@ function startMockCloud({
     const prefix = `/api/agent/sessions/${SESSION_ID}/artifacts/`;
     if (url.pathname.startsWith(prefix)) {
       const name = decodeURIComponent(url.pathname.slice(prefix.length));
+      if (artifactResponse === "unauthorized") {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
       const artifact = artifacts[name];
       if (artifact === undefined) {
         res.writeHead(404);
@@ -196,9 +238,21 @@ function startMockCloud({
         return;
       }
       if (artifactResponse === "stalled" && name === "index.json") {
-        // The real agent router answers GET only, so the mock has no HEAD
-        // branch: the stat and the read both take this stalled GET path.
+        // Headers land for a GET and then the body never finishes. A HEAD gets
+        // nothing at all: node holds the header until end(), which never comes.
         res.writeHead(200, { "content-type": "application/json" });
+        res.write('{"id":');
+        return;
+      }
+      if (artifactResponse === "stalled-body" && name === "index.json") {
+        res.writeHead(200, { "content-type": "application/json" });
+        // A HEAD has no body to stall on, so end it and let the stat get its
+        // headers. Chunked framing means no size came with them, which is what
+        // pushes the stat onto the GET byteLength fallback below.
+        if (req.method === "HEAD") {
+          res.end();
+          return;
+        }
         res.write('{"id":');
         return;
       }
@@ -380,18 +434,15 @@ describe("MCP remote read store", () => {
         request.path.endsWith("/artifacts/candidates.json"),
       ),
     ).toBe(false);
-    // The agent router rejects every non-GET method at entry, so the artifact
-    // stat must go out as a GET and no HEAD may ever be attempted.
+    // The stat now goes out as a HEAD, which the cloud audits as a stat rather
+    // than booking a read of a body it never sent.
     expect(
       mock.requests.some(
         (request) =>
-          request.method === "GET" &&
+          request.method === "HEAD" &&
           request.path.endsWith("/artifacts/index.json"),
       ),
     ).toBe(true);
-    expect(
-      mock.requests.some((request) => request.method === "HEAD"),
-    ).toBe(false);
   });
 
   it("returns an empty list when the session response body stalls", async () => {
@@ -463,9 +514,10 @@ describe("MCP remote read store", () => {
     await declared.text();
   });
 
-  it("stats an artifact with a single GET when the endpoint declares Content-Length", async () => {
-    // Mirrors the fixed hosted cloud. The stat takes the size off the header
-    // and cancels the body, so it costs one request and buffers no artifact.
+  it("stats an artifact with a single HEAD when the endpoint declares Content-Length", async () => {
+    // Mirrors the current hosted cloud. The stat takes the size off the header
+    // of a HEAD, so it costs one request, buffers no artifact, and is audited
+    // as a stat rather than as a read of a body that was never sent.
     mock = await startMockCloud({ artifactFraming: "content-length" });
     const store = new RemoteMcpReadStore({
       baseUrl: mock.baseUrl,
@@ -480,7 +532,8 @@ describe("MCP remote read store", () => {
       isDir: false,
     });
 
-    // Exactly one GET. A second request here means the cheap path stopped
+    // Exactly one HEAD. A GET here means the stat went back to booking a
+    // phantom read audit row; a second request means the cheap path stopped
     // firing and every stat silently became a full artifact download again.
     expect(
       mock.requests.filter((request) =>
@@ -488,16 +541,91 @@ describe("MCP remote read store", () => {
       ),
     ).toEqual([
       expect.objectContaining({
-        method: "GET",
+        method: "HEAD",
         path: `/api/agent/sessions/${SESSION_ID}/artifacts/index.json`,
       }),
     ]);
   });
 
-  it("bounds the stat to one extra GET when the endpoint omits Content-Length", async () => {
-    // Mirrors an endpoint answering with chunked framing: the size is only
-    // knowable by downloading the body, so the stat costs a second GET — and
-    // must cost no more than that.
+  it("falls back to a GET stat against a cloud that does not serve HEAD", async () => {
+    // The published client cannot assume the cloud it talks to has been
+    // upgraded. An old cloud 404s the HEAD, which must read as "no HEAD here"
+    // and not as "no artifact", or every stat against it breaks — the CT-006
+    // failure, in reverse.
+    mock = await startMockCloud({
+      artifactFraming: "content-length",
+      headSupport: "get-only",
+    });
+    const store = new RemoteMcpReadStore({
+      baseUrl: mock.baseUrl,
+      token: TOKEN,
+    });
+
+    mock.requests.length = 0;
+    await expect(
+      store.statArtifact(SESSION_ID, "index.json"),
+    ).resolves.toEqual({
+      bytes: Buffer.byteLength(artifacts["index.json"]),
+      isDir: false,
+    });
+
+    const statRequests = mock.requests.filter((request) =>
+      request.path.endsWith("/artifacts/index.json"),
+    );
+    expect(statRequests.map((request) => request.method)).toEqual([
+      "HEAD",
+      "GET",
+    ]);
+  });
+
+  it("reports a missing artifact as absent rather than retrying forever", async () => {
+    // Both methods 404 because the artifact really is gone. The HEAD first
+    // fallback must not turn that into a hang or a bogus size.
+    mock = await startMockCloud({ artifactFraming: "content-length" });
+    const store = new RemoteMcpReadStore({
+      baseUrl: mock.baseUrl,
+      token: TOKEN,
+    });
+
+    mock.requests.length = 0;
+    await expect(
+      store.statArtifact(SESSION_ID, "does-not-exist.json"),
+    ).resolves.toBeUndefined();
+
+    // One HEAD, then one GET to disambiguate the 404, and then it stops.
+    expect(
+      mock.requests
+        .filter((request) => request.path.endsWith("/does-not-exist.json"))
+        .map((request) => request.method),
+    ).toEqual(["HEAD", "GET"]);
+  });
+
+  it("does not retry a stat the cloud actively refused", async () => {
+    // A 401 is an answer, not a missing method. Only the statuses that mean
+    // "this endpoint will not answer a HEAD" earn the GET retry; retrying a
+    // refusal would double the cost of every rejected stat.
+    mock = await startMockCloud({ artifactResponse: "unauthorized" });
+    const store = new RemoteMcpReadStore({
+      baseUrl: mock.baseUrl,
+      token: TOKEN,
+    });
+
+    mock.requests.length = 0;
+    await expect(
+      store.statArtifact(SESSION_ID, "index.json"),
+    ).resolves.toBeUndefined();
+
+    expect(
+      mock.requests
+        .filter((request) => request.path.endsWith("/artifacts/index.json"))
+        .map((request) => request.method),
+    ).toEqual(["HEAD"]);
+  });
+
+  it("bounds the stat to one extra request when the endpoint omits Content-Length", async () => {
+    // Mirrors an endpoint answering with chunked framing: HEAD declares no
+    // size, so the size is only knowable by downloading the body and the stat
+    // costs a second request — and must cost no more than that.
     mock = await startMockCloud({ artifactFraming: "chunked" });
     const store = new RemoteMcpReadStore({
       baseUrl: mock.baseUrl,
@@ -515,8 +643,10 @@ describe("MCP remote read store", () => {
     const statRequests = mock.requests.filter((request) =>
       request.path.endsWith("/artifacts/index.json"),
     );
-    expect(statRequests.length).toBe(2);
-    expect(statRequests.every((request) => request.method === "GET")).toBe(true);
+    expect(statRequests.map((request) => request.method)).toEqual([
+      "HEAD",
+      "GET",
+    ]);
   });
 
   it("times out stalled artifact reads and the stat fallback", async () => {
@@ -530,21 +660,48 @@ describe("MCP remote read store", () => {
 
     await expect(store.readArtifact(SESSION_ID, "index.json")).resolves.toBeUndefined();
 
-    // The stalled response carries no content-length, so the stat probe falls
-    // through to the bounded byteLength read, which can only end at the
-    // deadline. Asserting the elapsed time keeps this from passing vacuously:
-    // a stat that gave up early (or never issued the fallback) would return
-    // undefined too, but would not have waited out the timeout.
+    // A HEAD against a handler that never calls end() never resolves at all:
+    // node holds the header back, so there is nothing to read a size from and
+    // the deadline is the only exit. The stat must NOT then retry as a GET —
+    // a dead endpoint would just cost a second timeout — so this ends after
+    // one request. Asserting the elapsed time keeps it from passing vacuously:
+    // a stat that gave up early would return undefined too.
     mock.requests.length = 0;
     const startedAt = Date.now();
     await expect(store.statArtifact(SESSION_ID, "index.json")).resolves.toBeUndefined();
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(timeoutMs);
 
-    const statRequests = mock.requests.filter((request) =>
-      request.path.endsWith("/artifacts/index.json"),
-    );
-    expect(statRequests.length).toBe(2);
-    expect(statRequests.every((request) => request.method === "GET")).toBe(true);
+    expect(
+      mock.requests
+        .filter((request) => request.path.endsWith("/artifacts/index.json"))
+        .map((request) => request.method),
+    ).toEqual(["HEAD"]);
+  });
+
+  it("times out the stat byteLength fallback when only the body stalls", async () => {
+    // Headers arrive on the HEAD with no size, so the stat falls through to the
+    // bounded byteLength read — and that read is what runs into the deadline.
+    // This is the fallback path the stalled case above can no longer reach.
+    mock = await startMockCloud({ artifactResponse: "stalled-body" });
+    const timeoutMs = 25;
+    const store = new RemoteMcpReadStore({
+      baseUrl: mock.baseUrl,
+      token: TOKEN,
+      timeoutMs,
+    });
+
+    mock.requests.length = 0;
+    const startedAt = Date.now();
+    await expect(
+      store.statArtifact(SESSION_ID, "index.json"),
+    ).resolves.toBeUndefined();
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(timeoutMs);
+
+    expect(
+      mock.requests
+        .filter((request) => request.path.endsWith("/artifacts/index.json"))
+        .map((request) => request.method),
+    ).toEqual(["HEAD", "GET"]);
   });
 
   it("rejects an advertised oversized body without waiting for it", async () => {

@@ -769,6 +769,12 @@ describe("postProcess", () => {
         code: "PAYMENT_FAILED",
         offsetMs: 300,
       }),
+      expect.objectContaining({
+        status: 0,
+        reason: "network_error",
+        method: "GET",
+        offsetMs: 350,
+      }),
     ]);
     expect(bundle.browserEvidence.networkErrors).toEqual([
       expect.objectContaining({
@@ -1371,6 +1377,153 @@ describe("postProcess", () => {
     expect(index.failedReqs[0].m).toBe("POST");
     expect(index.failedReqs[0].url).toBe("/api/data");
     expect(index.failedReqs[0].st).toBe(500);
+  });
+
+  it("counts SDK network failures (net.err) as failed requests", async () => {
+    const events = [
+      {
+        t: 1000,
+        k: "net.req",
+        d: { id: 1, method: "POST", url: "/api/save" },
+      },
+      {
+        t: 1100,
+        k: "net.err",
+        d: {
+          id: 1,
+          method: "POST",
+          url: "/api/save",
+          dur: 100,
+          msg: "Failed to fetch",
+          name: "TypeError",
+          transport: "fetch",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+    const bundle = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "llm.json"), "utf-8"),
+    );
+
+    expect(index.failedReqs).toEqual([
+      expect.objectContaining({
+        t: 1100,
+        m: "POST",
+        url: "/api/save",
+        st: 0,
+        reason: "network_error",
+        message: "Failed to fetch",
+      }),
+    ]);
+    expect(index.networkErrors).toEqual([
+      expect.objectContaining({
+        t: 1100,
+        method: "POST",
+        url: "/api/save",
+        msg: "Failed to fetch",
+        transport: "fetch",
+      }),
+    ]);
+    expect(bundle.browserEvidence.failedRequests).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        url: "/api/save",
+        status: 0,
+        reason: "network_error",
+      }),
+    ]);
+  });
+
+  it("does not count aborted requests (net.err AbortError) as failed requests", async () => {
+    const events = [
+      {
+        t: 1000,
+        k: "net.req",
+        d: { id: 1, method: "GET", url: "/api/search" },
+      },
+      {
+        t: 1050,
+        k: "net.err",
+        d: {
+          id: 1,
+          method: "GET",
+          url: "/api/search",
+          dur: 50,
+          msg: "request aborted",
+          name: "AbortError",
+          transport: "fetch",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+
+    expect(index.failedReqs).toEqual([]);
+    // Aborts stay observable as network errors, they just don't count as failures.
+    expect(index.networkErrors).toEqual([
+      expect.objectContaining({ t: 1050, msg: "request aborted" }),
+    ]);
+  });
+
+  it("attaches the failing request to a fetch-failure rejection that follows it", async () => {
+    const events = [
+      {
+        t: 1000,
+        k: "net.req",
+        d: { id: 1, method: "POST", url: "/api/save" },
+      },
+      {
+        t: 1100,
+        k: "net.err",
+        d: {
+          id: 1,
+          method: "POST",
+          url: "/api/save",
+          dur: 100,
+          msg: "Failed to fetch",
+          name: "TypeError",
+          transport: "fetch",
+        },
+      },
+      {
+        t: 1105,
+        k: "rej",
+        d: { msg: "TypeError: Failed to fetch", stk: "at doSave" },
+      },
+      { t: 1200, k: "rej", d: { msg: "Error: unrelated failure" } },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+
+    expect(index.errs).toEqual([
+      expect.objectContaining({
+        t: 1105,
+        msg: "TypeError: Failed to fetch",
+        method: "POST",
+        url: "/api/save",
+      }),
+      expect.objectContaining({ t: 1200, msg: "Error: unrelated failure" }),
+    ]);
+    expect(index.errs[1].url).toBeUndefined();
   });
 
   it("indexes 200 responses with application failure payloads as failed requests", async () => {
@@ -1988,6 +2141,12 @@ describe("postProcess", () => {
     expect(bundle.browserEvidence.consoleErrors).toHaveLength(0);
     expect(bundle.browserEvidence.failedRequests).toEqual([
       expect.objectContaining({ status: 502, method: "GET" }),
+      expect.objectContaining({
+        status: 0,
+        reason: "network_error",
+        method: "POST",
+        url: "/api/offline",
+      }),
     ]);
     expect(bundle.browserEvidence.networkErrors).toEqual([
       expect.objectContaining({ method: "POST", message: "Failed to fetch" }),

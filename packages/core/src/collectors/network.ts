@@ -349,6 +349,26 @@ function wrapFetch(
     let response: Response;
     try {
       response = await originalFetch(fetchArgs.input, fetchArgs.init);
+    } catch (error) {
+      // Network-level failure (offline, DNS, CORS, abort): there is no Response,
+      // so emit a net.err carrying the request identity instead of a net.res.
+      const errData: Record<string, unknown> = {
+        id,
+        method,
+        url: urlResult.value,
+        dur: now() - startTime,
+        msg: error instanceof Error ? error.message : String(error),
+        transport: "fetch",
+      };
+      if (error instanceof Error && error.name && error.name !== "Error")
+        errData.name = error.name;
+      if (fetchArgs.sessionId) errData.sessionId = fetchArgs.sessionId;
+      if (fetchArgs.requestId) errData.requestId = fetchArgs.requestId;
+      if (fetchArgs.traceId) errData.traceId = fetchArgs.traceId;
+      if (fetchArgs.spanId) errData.spanId = fetchArgs.spanId;
+      attachRedactionMetadata(errData, urlResult.metadata);
+      bus.emit({ t: now(), k: "net.err", d: errData });
+      throw error;
     } finally {
       pending.delete(id);
     }
@@ -710,9 +730,34 @@ function wrapXHR(
       bus.emit({ t: now(), k: "net.res", d: resData });
     };
 
+    // error/timeout/abort settle the XHR without an HTTP response (status 0),
+    // so they emit a net.err carrying the request identity instead of a net.res.
+    const emitFailure = (msg: string, name?: string) => {
+      const errData: Record<string, unknown> = {
+        id: meta.id,
+        method: meta.method,
+        url: urlResult.value,
+        dur: now() - meta.startTime,
+        msg,
+        transport: "xhr",
+      };
+      if (name) errData.name = name;
+      if (meta.sessionId) errData.sessionId = meta.sessionId;
+      if (meta.requestId) errData.requestId = meta.requestId;
+      if (meta.traceId) errData.traceId = meta.traceId;
+      if (meta.spanId) errData.spanId = meta.spanId;
+      attachRedactionMetadata(errData, urlResult.metadata);
+      bus.emit({ t: now(), k: "net.err", d: errData });
+    };
+
     this.addEventListener("load", emitResponse);
-    this.addEventListener("error", emitResponse);
-    this.addEventListener("timeout", emitResponse);
+    this.addEventListener("error", () => emitFailure("network error"));
+    this.addEventListener("timeout", () =>
+      emitFailure("request timed out", "TimeoutError"),
+    );
+    this.addEventListener("abort", () =>
+      emitFailure("request aborted", "AbortError"),
+    );
 
     pending.set(meta.id, {
       method: meta.method,

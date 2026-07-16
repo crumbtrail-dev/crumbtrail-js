@@ -136,6 +136,20 @@ export class RemoteMcpReadStore implements McpReadStore {
     return bytes === undefined ? undefined : { bytes, isDir: false };
   }
 
+  /**
+   * Statuses that mean "this endpoint will not answer a HEAD", as opposed to
+   * "this artifact is not there".
+   *
+   * 404 is in here because of how the agent router used to behave: it rejected
+   * every non GET before resolving the token, so the request fell through to
+   * the catch all and a HEAD stat came back 404 — indistinguishable from a
+   * missing artifact. A cloud old enough to do that still answers the same GET
+   * stat this client used to send, so a 404 HEAD must be retried as a GET
+   * rather than reported as absence. 405 and 501 cover intermediaries that
+   * refuse the method outright.
+   */
+  private static readonly HEAD_UNSUPPORTED_STATUSES = new Set([404, 405, 501]);
+
   private artifactPath(
     sessionId: string,
     name: string,
@@ -144,26 +158,57 @@ export class RemoteMcpReadStore implements McpReadStore {
   }
 
   /**
-   * Stats an artifact with a GET that is discarded after the headers arrive.
+   * Stats an artifact by asking for its headers, preferring HEAD.
    *
-   * The agent router answers GET only and rejects every other method at entry,
-   * so a HEAD stat can never succeed against it. fetch() resolves at the
-   * headers, so the caller still only pays for the header round trip — but the
-   * body MUST be cancelled here rather than buffered, otherwise a stalled or
-   * oversized artifact would hang the stat or hold the socket open.
+   * HEAD is the honest way to ask: the cloud audits it as a `stat` rather than
+   * as a read, because no body is served. The GET stat this used to send is
+   * indistinguishable from a real read at the server, so it books a read audit
+   * row for evidence the agent never receives — and the row is written before
+   * the body, so cancelling the stream cannot take it back. One session
+   * existence check stats six artifacts, so that was six phantom rows per
+   * check on a compliance surface.
+   *
+   * GET remains the fallback for a cloud that does not serve HEAD, so this
+   * client keeps working against an older deployment. See
+   * HEAD_UNSUPPORTED_STATUSES for why a 404 is treated as "no HEAD here"
+   * rather than "no artifact".
    */
   private async fetchHead(path: string): Promise<Response | undefined> {
+    const head = await this.fetchHeaders(path, "HEAD");
+    // A transport failure or a blown deadline, which a second request would
+    // only pay for twice.
+    if (head === undefined) return undefined;
+    if (head.status === 200) return head;
+    if (!RemoteMcpReadStore.HEAD_UNSUPPORTED_STATUSES.has(head.status)) {
+      return undefined;
+    }
+    const get = await this.fetchHeaders(path, "GET");
+    return get?.status === 200 ? get : undefined;
+  }
+
+  /**
+   * Fetches one response and discards any body, returning it whatever the
+   * status so the caller can tell the statuses apart.
+   *
+   * fetch() resolves at the headers, so this only pays for the header round
+   * trip — but a GET body MUST be cancelled here rather than buffered, or a
+   * stalled or oversized artifact would hang the stat or hold the socket open.
+   */
+  private async fetchHeaders(
+    path: string,
+    method: "HEAD" | "GET",
+  ): Promise<Response | undefined> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await globalThis.fetch(`${this.baseUrl}${path}`, {
-        method: "GET",
+        method,
         headers: { Authorization: `Bearer ${this.token}` },
         signal: controller.signal,
       });
       // Headers are all this stat consumes; drop the body without reading it.
       void response.body?.cancel().catch(() => undefined);
-      return response.status === 200 ? response : undefined;
+      return response;
     } catch {
       return undefined;
     } finally {
