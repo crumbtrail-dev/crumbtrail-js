@@ -59,6 +59,7 @@ import {
   type RecallStore,
 } from "./recall";
 import {
+  AMBIGUOUS_LOCATED_SESSION_GAP,
   gatherAdapterEvidence,
   locateEvidence,
   NO_LOCATED_SESSION_GAP,
@@ -1738,6 +1739,9 @@ export class McpServer {
             ? { sessionId: located.match.sessionId }
             : {}),
           reasons: located.match.reasons,
+          ...(located.match.outcome === "ambiguous" && located.match.candidates
+            ? { candidates: located.match.candidates }
+            : {}),
         };
         // Adapter phase: query the client's configured evidence sources for the
         // located window (matched) or a sessionless fallback window (Mode A) and
@@ -1840,6 +1844,9 @@ export class McpServer {
 
     const gaps = [
       ...ticketGaps,
+      ...(locatedDecision?.outcome === "ambiguous"
+        ? [AMBIGUOUS_LOCATED_SESSION_GAP]
+        : []),
       // Adapter-only (sessionless Mode A) bundle: state that no Crumbtrail session
       // matched even though the bundle is populated from evidence sources.
       ...(sessionlessAdapterBundle ? [NO_LOCATED_SESSION_GAP] : []),

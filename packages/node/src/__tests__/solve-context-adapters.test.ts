@@ -227,6 +227,53 @@ describe("solveContext MCP tool — blended (session + adapter) evidence", () =>
   });
 });
 
+describe("solveContext MCP tool — ambiguous locate", () => {
+  it("carries candidates without selecting or citing either session", async () => {
+    const root = makeRoot();
+    seedMatchingSession(root, "session-one");
+    seedMatchingSession(root, "session-two");
+    const server = new McpServer({
+      outputDir: root,
+      evidenceSourcesFactory: () => [],
+    });
+
+    const bundle = bundleFrom(
+      await server.handleMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "solveContext",
+          arguments: {
+            symptom: {
+              title: "checkout failed span error",
+              url: "/api/checkout",
+              errorSig: "otel_span_error",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(bundle.located.outcome).toBe("ambiguous");
+    expect(bundle.located.sessionId).toBeUndefined();
+    expect(bundle.located.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: "session-one" }),
+        expect.objectContaining({ sessionId: "session-two" }),
+      ]),
+    );
+    expect(bundle.evidence).toEqual([]);
+    expect(
+      bundle.gaps.some((gap: any) =>
+        gap.reason.includes(
+          "multiple candidate sessions scored within the decision margin",
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("solveContext MCP tool — no regression / advisory", () => {
   it("with ZERO sources configured, a no-session request is identical to today", async () => {
     const root = makeRoot();

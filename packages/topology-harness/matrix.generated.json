@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "generatedBy": "crumbtrail-topology-harness",
   "stamp": {
-    "crumbtrailNodeVersion": "0.2.4",
+    "crumbtrailNodeVersion": "0.3.0",
     "runId": "local",
     "sha": "local",
-    "generatedAt": "2026-07-16T02:31:19.338Z"
+    "generatedAt": "2026-07-16T07:43:56.078Z"
   },
   "cells": [
     {

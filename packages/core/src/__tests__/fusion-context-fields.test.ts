@@ -53,8 +53,18 @@ describe("contextCompleteness — calibration", () => {
     const bundle = assembleBundle({
       symptom,
       evidence: [
-        item({ id: "n1", lane: "network", kind: "net.status", brief: "POST /api/checkout 500" }),
-        item({ id: "n2", lane: "network", kind: "net.status", brief: "POST /api/checkout slow" }),
+        item({
+          id: "n1",
+          lane: "network",
+          kind: "net.status",
+          brief: "POST /api/checkout 500",
+        }),
+        item({
+          id: "n2",
+          lane: "network",
+          kind: "net.status",
+          brief: "POST /api/checkout slow",
+        }),
       ],
       intent: [],
       gaps: [{ lane: "db", reason: "no db diff captured" }],
@@ -77,11 +87,36 @@ describe("contextCompleteness — calibration", () => {
     const bundle = assembleBundle({
       symptom,
       evidence: [
-        item({ id: "n1", lane: "network", kind: "net.status", brief: "POST /api/checkout 500" }),
-        item({ id: "n2", lane: "network", kind: "net.status", brief: "retry 500" }),
-        item({ id: "d1", lane: "db", kind: "db.row-value", brief: "orders row stuck" }),
-        item({ id: "f1", lane: "flow", kind: "flow.step-missing", brief: "confirm step never reached" }),
-        item({ id: "f2", lane: "flow", kind: "flow.step-missing", brief: "redirect skipped" }),
+        item({
+          id: "n1",
+          lane: "network",
+          kind: "net.status",
+          brief: "POST /api/checkout 500",
+        }),
+        item({
+          id: "n2",
+          lane: "network",
+          kind: "net.status",
+          brief: "retry 500",
+        }),
+        item({
+          id: "d1",
+          lane: "db",
+          kind: "db.row-value",
+          brief: "orders row stuck",
+        }),
+        item({
+          id: "f1",
+          lane: "flow",
+          kind: "flow.step-missing",
+          brief: "confirm step never reached",
+        }),
+        item({
+          id: "f2",
+          lane: "flow",
+          kind: "flow.step-missing",
+          brief: "redirect skipped",
+        }),
       ],
       intent: [],
       located,
@@ -97,7 +132,12 @@ describe("contextCompleteness — calibration", () => {
       symptom,
       evidence: [
         item({ id: "n1", lane: "network", kind: "net.status", brief: "500" }),
-        item({ id: "d1", lane: "db", kind: "db.row-value", brief: "row stuck" }),
+        item({
+          id: "d1",
+          lane: "db",
+          kind: "db.row-value",
+          brief: "row stuck",
+        }),
       ],
       intent: [],
     });
@@ -105,6 +145,43 @@ describe("contextCompleteness — calibration", () => {
     expect(withoutLocate.located).toBeUndefined();
     expect(withoutLocate.contextCompleteness.reasons).not.toContain(
       "incident location inconclusive",
+    );
+  });
+
+  it("treats an ambiguous locate like an inconclusive locate and never lifts completeness", () => {
+    const input = {
+      symptom: { title: "checkout is broken" },
+      evidence: [],
+      intent: [],
+      gaps: [
+        { lane: "network" as const, reason: "no recorded session matched" },
+      ],
+    };
+    const inconclusive = assembleBundle({
+      ...input,
+      located: { outcome: "inconclusive", confidence: 0.2 },
+    });
+    const ambiguous = assembleBundle({
+      ...input,
+      located: {
+        outcome: "ambiguous",
+        confidence: 0.95,
+        candidates: [
+          {
+            sessionId: "session-a",
+            bugId: "bug-a",
+            confidence: 0.95,
+            reasons: ["semantic"],
+          },
+        ],
+      },
+    });
+
+    expect(ambiguous.contextCompleteness.score).toBe(
+      inconclusive.contextCompleteness.score,
+    );
+    expect(ambiguous.contextCompleteness.reasons).toContain(
+      "incident location ambiguous",
     );
   });
 });
@@ -147,7 +224,9 @@ describe("verification — anchored, never vacuous", () => {
       ],
       intent: [],
     });
-    const regression = bundle.opinion.hypotheses.find((h) => h.kind === "regression");
+    const regression = bundle.opinion.hypotheses.find(
+      (h) => h.kind === "regression",
+    );
     expect(regression?.verification).toBeDefined();
     expect(regression?.verification).toHaveLength(1);
     const v = regression!.verification![0];
@@ -171,7 +250,9 @@ describe("verification — anchored, never vacuous", () => {
       ],
       intent: [],
     });
-    const regression = bundle.opinion.hypotheses.find((h) => h.kind === "regression");
+    const regression = bundle.opinion.hypotheses.find(
+      (h) => h.kind === "regression",
+    );
     const v = regression?.verification?.[0];
     expect(v?.how).toBe("db");
     expect(v?.observation).toContain("orders");
@@ -189,7 +270,9 @@ describe("verification — anchored, never vacuous", () => {
       ],
       intent: [],
     });
-    const regression = bundle.opinion.hypotheses.find((h) => h.kind === "regression");
+    const regression = bundle.opinion.hypotheses.find(
+      (h) => h.kind === "regression",
+    );
     expect(regression?.verification).toHaveLength(1);
     expect(regression?.verification?.[0].evidenceIds).toEqual(["n1"]);
   });
@@ -228,15 +311,40 @@ describe("escalation — consumer-side advisory, distinct from gaps", () => {
       symptom: { title: "checkout 500s", url: "/api/checkout" },
       evidence: [
         item({ id: "n1", lane: "network", kind: "net.status", brief: "500" }),
-        item({ id: "n2", lane: "network", kind: "net.status", brief: "500 retry" }),
-        item({ id: "d1", lane: "db", kind: "db.row-value", brief: "row stuck" }),
-        item({ id: "f1", lane: "flow", kind: "flow.step-missing", brief: "step skipped" }),
-        item({ id: "f2", lane: "flow", kind: "flow.step-missing", brief: "redirect skipped" }),
+        item({
+          id: "n2",
+          lane: "network",
+          kind: "net.status",
+          brief: "500 retry",
+        }),
+        item({
+          id: "d1",
+          lane: "db",
+          kind: "db.row-value",
+          brief: "row stuck",
+        }),
+        item({
+          id: "f1",
+          lane: "flow",
+          kind: "flow.step-missing",
+          brief: "step skipped",
+        }),
+        item({
+          id: "f2",
+          lane: "flow",
+          kind: "flow.step-missing",
+          brief: "redirect skipped",
+        }),
       ],
       intent: [],
       // A soft gap exists (capture-side) but context is still rich...
       gaps: [{ lane: "env", reason: "env snapshot partial" }],
-      located: { outcome: "matched", confidence: 0.85, method: "fuzzy", sessionId: "ses_a" },
+      located: {
+        outcome: "matched",
+        confidence: 0.85,
+        method: "fuzzy",
+        sessionId: "ses_a",
+      },
     });
     // ...so escalation (consumer-side) is NOT recommended: gaps ≠ escalation.
     expect(bundle.gaps.length).toBeGreaterThan(0);

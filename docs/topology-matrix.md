@@ -4,10 +4,10 @@
 
 This matrix is produced by deterministic CI scenarios that use the public Crumbtrail instrumentation helpers.
 
-Node package version: 0.2.4.
+Node package version: 0.3.0.
 Run: local.
 Revision: local.
-Generation timestamp: 2026-07-16T02:31:19.338Z.
+Generation timestamp: 2026-07-16T07:43:56.078Z.
 
 | Cell | Driver or ORM | Process shape | Edge | Transaction pattern | Capture mode | Expected | Achieved |
 | --- | --- | --- | --- | --- | --- | --- | --- |

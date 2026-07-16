@@ -1716,6 +1716,8 @@ export function createServer(config: ServerConfig): http.Server {
         const rawOptions = isRecord(body.options) ? body.options : {};
         const opts: {
           threshold?: number;
+          margin?: number;
+          accountId?: string;
           now?: number;
           ticketCreatedAt?: number;
           tenantId?: string;
@@ -1723,6 +1725,12 @@ export function createServer(config: ServerConfig): http.Server {
         } = {};
         if (typeof rawOptions.threshold === "number") {
           opts.threshold = rawOptions.threshold;
+        }
+        if (typeof rawOptions.margin === "number") {
+          opts.margin = rawOptions.margin;
+        }
+        if (typeof rawOptions.accountId === "string") {
+          opts.accountId = rawOptions.accountId;
         }
         if (typeof rawOptions.now === "number") opts.now = rawOptions.now;
         // Ticket created-time anchors the sessionless (Mode A) fallback window to
@@ -1751,7 +1759,9 @@ export function createServer(config: ServerConfig): http.Server {
             ...opts,
             // An array, including [], owns source construction and blocks the
             // environment fallback. Undefined is the explicit legacy opt in.
-            ...(factorySources === undefined ? {} : { sources: factorySources }),
+            ...(factorySources === undefined
+              ? {}
+              : { sources: factorySources }),
           },
         );
         // `sources` is the per-source health summary (provider + ok + sanitized

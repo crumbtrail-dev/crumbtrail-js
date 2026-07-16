@@ -33,12 +33,16 @@ function checkoutEvents(status = 500): BugEvent[] {
 
 /** Seed a finalized session dir with an llm.json carrying distinctBugs — the
  *  field the locate/recall store reads. */
-function seedLocatedSession(name: string, distinctBugs: unknown[]): void {
+function seedLocatedSession(
+  name: string,
+  distinctBugs: unknown[],
+  metadata: Record<string, unknown> = {},
+): void {
   const dir = path.join(outputDir, name);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, "meta.json"),
-    JSON.stringify({ sessionId: name }),
+    JSON.stringify({ sessionId: name, ...metadata }),
   );
   fs.writeFileSync(
     path.join(dir, "events.ndjson"),
@@ -198,6 +202,86 @@ describe("POST /api/solve-context — envelope", () => {
     expect("sessionId" in res.json.match).toBe(false);
     expect(res.json.bundle.evidence).toEqual([]);
     expect(res.json.bundle.gaps.length).toBeGreaterThan(0);
+  });
+
+  it("returns an ambiguous envelope with candidates and no cited session", async () => {
+    seedLocatedSession("session-one", [matchingBug]);
+    seedLocatedSession("session-two", [matchingBug]);
+
+    const res = await post(
+      "/api/solve-context",
+      {
+        symptom: {
+          title: "checkout failed span error",
+          url: "/api/checkout",
+          errorSig: "otel_span_error",
+        },
+      },
+      auth,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.json.match.outcome).toBe("ambiguous");
+    expect("sessionId" in res.json.match).toBe(false);
+    expect(res.json.match.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: "session-one" }),
+        expect.objectContaining({ sessionId: "session-two" }),
+      ]),
+    );
+    expect(res.json.bundle.evidence).toEqual([]);
+    expect(res.json.bundle.located.outcome).toBe("ambiguous");
+    expect(res.json.bundle.located.sessionId).toBeUndefined();
+  });
+
+  it("passes a configured decision margin through to location", async () => {
+    seedLocatedSession("session-one", [matchingBug]);
+    seedLocatedSession("session-two", [matchingBug]);
+
+    const res = await post(
+      "/api/solve-context",
+      {
+        symptom: {
+          title: "checkout failed span error",
+          url: "/api/checkout",
+          errorSig: "otel_span_error",
+        },
+        options: { margin: 0 },
+      },
+      auth,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.json.match.outcome).toBe("matched");
+    expect(res.json.match.sessionId).toBeDefined();
+  });
+
+  it("passes accountId through to the locate engine", async () => {
+    seedLocatedSession("session-foreign", [matchingBug], {
+      accountId: "account-foreign",
+    });
+    seedLocatedSession("session-target", [matchingBug], {
+      accountId: "account-target",
+    });
+
+    const res = await post(
+      "/api/solve-context",
+      {
+        symptom: {
+          title: "checkout failed span error",
+          url: "/api/checkout",
+          errorSig: "otel_span_error",
+        },
+        options: { accountId: "account-target" },
+      },
+      auth,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.json.match).toMatchObject({
+      outcome: "matched",
+      sessionId: "session-target",
+    });
   });
 
   it("rejects a body without a symptom title (400)", async () => {

@@ -9,9 +9,13 @@
 /** The subset of the locate envelope this builder reads. `outcome` is the only
  *  signal that flips the comment shape; `confidence` is display-only. */
 export interface AdvisoryCommentMatch {
-  outcome: "matched" | "inconclusive";
+  outcome: "matched" | "ambiguous" | "inconclusive";
   confidence: number;
   reasons?: string[];
+  candidates?: Array<{
+    sessionId: string;
+    confidence: number;
+  }>;
 }
 
 /** One evidence gap surfaced from the bundle (mirrors core's EvidenceGap). */
@@ -37,6 +41,8 @@ export interface BuildAdvisoryCommentInput {
   match: AdvisoryCommentMatch;
   /** Public link to the persisted bundle (`/api/bundles/:id`). Always rendered. */
   bundleUrl: string;
+  /** Public session page collection URL, for example `https://app.example/sessions`. */
+  sessionUrlBase?: string;
   gaps?: AdvisoryCommentGap[];
   /** Correlation keys from the located evidence (matched variant only). */
   correlation?: AdvisoryCommentCorrelation;
@@ -107,8 +113,34 @@ function correlationLines(
   return items;
 }
 
+function appendGapParagraphs(
+  paragraphs: string[],
+  gaps: AdvisoryCommentGap[],
+): void {
+  const namedGaps = gaps.filter(
+    (gap) =>
+      gap && typeof gap.reason === "string" && gap.reason.trim().length > 0,
+  );
+  if (namedGaps.length > 0) {
+    paragraphs.push(
+      "What is missing:",
+      ...namedGaps.map((gap) =>
+        gap.suggestion ? `${gap.reason}: ${gap.suggestion}` : gap.reason,
+      ),
+    );
+  }
+}
+
+function candidateSessionLink(
+  sessionUrlBase: string | undefined,
+  sessionId: string,
+): string {
+  const base = sessionUrlBase?.trim().replace(/\/+$/, "");
+  return base ? `${base}/${encodeURIComponent(sessionId)}` : sessionId;
+}
+
 /**
- * Build the advisory plain text comment. Two shapes, chosen by `match.outcome`:
+ * Build the advisory plain text comment. Three shapes, chosen by `match.outcome`:
  *
  * - matched: names that a candidate incident was located, shows the rounded
  *   confidence as an advisory percentage, lists the match reasons in plain
@@ -118,6 +150,8 @@ function correlationLines(
  * - inconclusive: states honestly that no recorded incident matched, lists the
  *   evidence gaps (if any) so the reader knows what is missing, and still links
  *   the (empty) bundle. It fabricates no match and reports no percentage.
+ * - ambiguous: lists close candidate sessions without asserting that any one
+ *   session is the incident, then renders the same gap guidance and bundle link.
  *
  * Pure and side-effect free — unit-testable in isolation.
  */
@@ -153,22 +187,34 @@ export function buildAdvisoryComment(
     return { paragraphs };
   }
 
+  if (match.outcome === "ambiguous") {
+    const candidates = (match.candidates ?? []).filter(
+      (candidate) =>
+        candidate &&
+        typeof candidate.sessionId === "string" &&
+        candidate.sessionId.trim().length > 0 &&
+        typeof candidate.confidence === "number",
+    );
+    paragraphs.push(
+      `Crumbtrail found ${candidates.length} candidate sessions for this ticket but none is conclusive.`,
+      ...candidates.map(
+        (candidate) =>
+          `Candidate session: ${candidateSessionLink(input.sessionUrlBase, candidate.sessionId)} (confidence ${confidencePercent(candidate.confidence)}%)`,
+      ),
+    );
+    appendGapParagraphs(paragraphs, gaps);
+    paragraphs.push(
+      "Review the candidates before acting.",
+      `Open the evidence bundle: ${bundleUrl}`,
+    );
+    return { paragraphs };
+  }
+
   // inconclusive: honest, gaps only, no fabricated match.
   paragraphs.push(
     "Crumbtrail could not locate a recorded incident matching this ticket yet.",
   );
-  const namedGaps = gaps.filter(
-    (gap) =>
-      gap && typeof gap.reason === "string" && gap.reason.trim().length > 0,
-  );
-  if (namedGaps.length > 0) {
-    paragraphs.push(
-      "What is missing:",
-      ...namedGaps.map((gap) =>
-        gap.suggestion ? `${gap.reason}: ${gap.suggestion}` : gap.reason,
-      ),
-    );
-  }
+  appendGapParagraphs(paragraphs, gaps);
   paragraphs.push(`Open the evidence bundle: ${bundleUrl}`);
   return { paragraphs };
 }

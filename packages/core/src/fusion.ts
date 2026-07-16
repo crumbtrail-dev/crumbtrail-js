@@ -66,7 +66,7 @@ export interface Verification {
  * "token" without a schema change (War-game 02 Fork C: one definition, reused).
  */
 export interface Located {
-  outcome: "matched" | "inconclusive";
+  outcome: "matched" | "ambiguous" | "inconclusive";
   /** 0..1 locate confidence. */
   confidence: number;
   /**
@@ -78,6 +78,13 @@ export interface Located {
   /** The matched session, present ONLY when outcome === "matched". Never fabricated. */
   sessionId?: string;
   reasons?: string[];
+  /** Compact candidate projection for an ambiguous locate. */
+  candidates?: Array<{
+    sessionId: string;
+    bugId: string;
+    confidence: number;
+    reasons: string[];
+  }>;
 }
 
 /**
@@ -185,7 +192,9 @@ export function assembleBundle(input: AssembleBundleInput): RankedBundle {
   // for anchored evidence kinds (see deriveVerification).
   const hypotheses = classified.map((hypothesis) => {
     const verification = deriveVerification(hypothesis, evidence);
-    return verification.length > 0 ? { ...hypothesis, verification } : hypothesis;
+    return verification.length > 0
+      ? { ...hypothesis, verification }
+      : hypothesis;
   });
 
   const contextCompleteness = deriveContextCompleteness(
@@ -262,13 +271,18 @@ function deriveContextCompleteness(
   let score = 0.4 * breadth + 0.25 * volume + 0.35 * hypothesisStrength;
 
   if (located) {
-    score =
-      located.outcome === "matched"
-        ? 0.85 * score + 0.15 * clamp01(located.confidence)
-        : score * 0.6;
+    if (located.outcome === "matched") {
+      score = 0.85 * score + 0.15 * clamp01(located.confidence);
+    } else {
+      // Ambiguous and inconclusive locations cannot increase confidence: no
+      // single session has been identified safely enough to strengthen context.
+      score *= 0.6;
+    }
   }
 
-  const hardGaps = gaps.filter((gap) => gap.kind === "source-unavailable").length;
+  const hardGaps = gaps.filter(
+    (gap) => gap.kind === "source-unavailable",
+  ).length;
   const softGaps = gaps.length - hardGaps;
   const gapPenalty = Math.min(0.5, softGaps * 0.1 + hardGaps * 0.3);
   score = clamp01(score - gapPenalty);
@@ -290,8 +304,12 @@ function deriveContextCompleteness(
   }
   if (hardGaps > 0) reasons.push(`source unavailable for ${hardGaps} lane(s)`);
   if (softGaps > 0) reasons.push(`${softGaps} evidence gap(s)`);
-  if (located?.outcome === "inconclusive") {
-    reasons.push("incident location inconclusive");
+  if (located?.outcome === "inconclusive" || located?.outcome === "ambiguous") {
+    reasons.push(
+      located.outcome === "ambiguous"
+        ? "incident location ambiguous"
+        : "incident location inconclusive",
+    );
   }
   if (!top || top.kind === "inconclusive") {
     reasons.push("no distinguishing hypothesis");
@@ -327,7 +345,12 @@ function deriveVerification(
   for (const item of evidence) {
     if (!cited.has(item.id)) continue;
     const ref = item.ref;
-    if (item.lane === "db" && ref.table && ref.pk && Object.keys(ref.pk).length > 0) {
+    if (
+      item.lane === "db" &&
+      ref.table &&
+      ref.pk &&
+      Object.keys(ref.pk).length > 0
+    ) {
       out.push({
         observation: `row in ${ref.table} (${pkString(ref.pk)}) matches the intended post-fix state`,
         evidenceIds: [item.id],
