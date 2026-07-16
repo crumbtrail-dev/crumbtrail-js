@@ -25,6 +25,78 @@ describe("llm bundle", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("preserves only minted and W3C correlation ids while redacting token shaped values", () => {
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const requestId = "req_m9z4x9_abcdefghijkl";
+    const sessionId = "ses_20260715_123456_abcdef123456";
+    const secrets = [
+      "sk_fake_abcdefghijklmnopqrstuvwx",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.signature",
+      "AKIAIOSFODNN7EXAMPLE",
+    ];
+    const events: BugEvent[] = [
+      { t: 1_700_000_000_000, k: "session.lifecycle", d: { action: "start" } },
+      {
+        t: 1_700_000_000_001,
+        k: "db.diff",
+        d: { engine: "postgres", op: "update", table: "orders", pk: { id: 1 }, requestId: traceId },
+      },
+      {
+        t: 1_700_000_000_002,
+        k: "db.diff",
+        d: { engine: "postgres", op: "update", table: "orders", pk: { id: 2 }, requestId },
+      },
+      ...secrets.map((requestId, index) => ({
+        t: 1_700_000_000_003 + index,
+        k: "db.diff" as const,
+        d: { engine: "postgres", op: "update", table: "orders", pk: { id: index + 3 }, requestId },
+      })),
+    ];
+    const index: SessionIndexLike = {
+      id: sessionId,
+      start: events[0].t,
+      end: events.at(-1)!.t,
+      dur: 5,
+      evts: events.length,
+      stats: { "db.diff": 5 },
+      fullStackRequests: {
+        schemaVersion: 1,
+        summary: { frontendRequests: 2, backendRequests: 2, linked: 2, gaps: 0 },
+        linked: [
+          {
+            requestId: traceId,
+            sessionId,
+            frontend: { requestId: traceId, sessionId, method: "POST" },
+            backend: { requestId: traceId, sessionId, method: "POST" },
+          },
+          {
+            requestId: secrets[0],
+            sessionId: secrets[1],
+            frontend: { requestId: secrets[0], sessionId: secrets[1], method: "POST" },
+            backend: { requestId: secrets[0], sessionId: secrets[1], method: "POST" },
+          },
+        ],
+        gaps: [
+          { type: "frontend-only", requestId, sessionId },
+          { type: "frontend-only", requestId: secrets[2], sessionId: secrets[0] },
+        ],
+      },
+    };
+
+    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    expect(bundle.databaseDiffs.map((diff) => diff.requestId)).toEqual([
+      traceId,
+      requestId,
+      "[REDACTED]",
+      "[REDACTED]",
+      "[REDACTED]",
+    ]);
+    expect(bundle.fullStackEvidence.linked[0]).toMatchObject({ requestId: traceId, sessionId });
+    const serialized = JSON.stringify(bundle);
+    for (const secret of secrets) expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("[REDACTED]");
+  });
+
   it("surfaces a redaction-aware environment snapshot merged from env events", () => {
     const events: BugEvent[] = [
       {

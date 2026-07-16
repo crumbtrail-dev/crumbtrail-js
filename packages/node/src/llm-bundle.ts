@@ -503,7 +503,7 @@ interface MediaArtifactSummary {
   lastState?: string;
 }
 
-interface WriteLlmBundleInput {
+export interface WriteLlmBundleInput {
   sessionDir: string;
   events: BugEvent[];
   index: SessionIndexLike;
@@ -1472,7 +1472,7 @@ function buildDatabaseDiffs(
             >)
           : undefined,
         rowCount: finiteNumber(event.d.rowCount),
-        requestId: safeText(event.d.requestId, 200),
+        requestId: safeCorrelationId(event.d.requestId, 200),
       }) as LlmBundleDbDiff,
     );
   }
@@ -3586,19 +3586,39 @@ function safeText(value: unknown, maxLength: number): string | undefined {
   return truncate(redactTokenLikeText(trimmed), maxLength);
 }
 
-// Matches an opaque correlation identifier: Crumbtrail request ids, W3C trace/span ids,
-// session ids. Restricted to id-safe characters so a value that looks like prose or a
-// secret never qualifies for the redaction bypass below.
-const CORRELATION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+// The only correlation identifiers that can bypass token redaction are formats that
+// Crumbtrail itself mints plus the W3C identifiers it explicitly adopts. This must
+// stay deliberately narrow: arbitrary URL-safe strings include API keys and JWTs.
+const W3C_TRACE_ID_RE = /^[0-9a-f]{32}$/;
+const W3C_SPAN_ID_RE = /^[0-9a-f]{16}$/;
+const W3C_TRACEPARENT_RE = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
+const CRUMBTRAIL_REQUEST_ID_RE = /^req_[a-z0-9]+_[a-z0-9]{12}$/;
+const BACKEND_REQUEST_ID_RE = /^backend_req_[a-z0-9]+_[a-z0-9]{8}$/;
+const CRUMBTRAIL_SESSION_ID_RE = /^ses_\d{8}_\d{6}_[0-9a-f]{12}$/;
+const AWS_ACCESS_KEY_RE = /^(?:AKIA|ASIA)[0-9A-Z]{16}$/;
+const TOKEN_PREFIX_RE = /^(?:sk|pk)_[A-Za-z0-9_-]{8,}$/;
+const BEARER_TOKEN_RE = /^bearer\s+\S+$/i;
+const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const LONG_OPAQUE_TOKEN_RE = /^[A-Za-z0-9._~+/=-]{33,}$/;
+
+function isSafeCorrelationId(value: string): boolean {
+  return (
+    W3C_TRACE_ID_RE.test(value) ||
+    W3C_SPAN_ID_RE.test(value) ||
+    W3C_TRACEPARENT_RE.test(value) ||
+    CRUMBTRAIL_REQUEST_ID_RE.test(value) ||
+    BACKEND_REQUEST_ID_RE.test(value) ||
+    CRUMBTRAIL_SESSION_ID_RE.test(value)
+  );
+}
 
 /**
  * Like {@link safeText} but does NOT run token-like redaction.
  *
- * Correlation ids (request id / trace id / span id) are opaque keys Crumbtrail mints or
- * adopts; a W3C trace id is exactly 32 hex and would otherwise be scrubbed by the
- * MD5/SHA-shaped redaction rule, silently breaking front-end ↔ back-end correlation in the
- * LLM bundle. These ids carry no secret/PII, so they are emitted verbatim (length-bounded
- * and charset-validated). Anything not id-shaped falls back to redacted text.
+ * Correlation ids that Crumbtrail mints or explicitly adopts are emitted verbatim. A
+ * W3C trace id is exactly 32 lowercase hex and would otherwise be scrubbed by the
+ * MD5/SHA shaped redaction rule, silently breaking front end to back end correlation in
+ * the LLM bundle. Everything else uses normal token redaction before it can rest here.
  */
 function safeCorrelationId(
   value: unknown,
@@ -3607,7 +3627,16 @@ function safeCorrelationId(
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   if (trimmed.length === 0) return undefined;
-  if (CORRELATION_ID_RE.test(trimmed)) return truncate(trimmed, maxLength);
+  if (isSafeCorrelationId(trimmed)) return truncate(trimmed, maxLength);
+  if (
+    AWS_ACCESS_KEY_RE.test(trimmed) ||
+    TOKEN_PREFIX_RE.test(trimmed) ||
+    BEARER_TOKEN_RE.test(trimmed) ||
+    JWT_RE.test(trimmed) ||
+    LONG_OPAQUE_TOKEN_RE.test(trimmed)
+  ) {
+    return REDACTED_VALUE;
+  }
   return safeText(trimmed, maxLength);
 }
 

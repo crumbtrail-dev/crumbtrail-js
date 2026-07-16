@@ -20,5 +20,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # build first: workspace typecheck resolves sibling packages' dist types.
       - run: pnpm build
+      - name: Check generated topology and benchmark artifacts
+        run: |
+          pnpm --filter crumbtrail-topology-harness check:matrix
+          pnpm --filter crumbtrail-topology-harness benchmark:check
+          pnpm --filter crumbtrail-topology-harness generate
+          pnpm --filter crumbtrail-topology-harness benchmark:report
+      - name: Upload topology and benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology_and_benchmark
+          path: |
+            packages/topology-harness/matrix.generated.json
+            packages/topology-harness/benchmark/report.generated.md
       - run: pnpm typecheck
       - run: pnpm test

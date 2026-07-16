@@ -1,0 +1,26 @@
+{
+  "name": "crumbtrail-topology-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "generate": "node dist/generate-matrix-cli.js",
+    "check:matrix": "node dist/generate-matrix-cli.js --check",
+    "benchmark:report": "node dist/benchmark/generate-report-cli.js",
+    "benchmark:check": "node dist/benchmark/generate-report-cli.js --check",
+    "benchmark:run": "node dist/benchmark/arm-runner-cli.js"
+  },
+  "dependencies": {
+    "crumbtrail-core": "workspace:^",
+    "crumbtrail-node": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.10"
+  }
+}

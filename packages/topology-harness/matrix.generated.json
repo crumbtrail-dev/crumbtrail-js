@@ -1,0 +1,917 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "crumbtrail-topology-harness",
+  "stamp": {
+    "crumbtrailNodeVersion": "0.2.4",
+    "runId": "local",
+    "sha": "local",
+    "generatedAt": "2026-07-16T02:31:19.338Z"
+  },
+  "cells": [
+    {
+      "id": "pg_direct_sdk_autocommit",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_pg_direct_sdk_autocommit",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "Direct PostgreSQL capture joins the action, request, and changed row."
+        ]
+      },
+      "notes": [
+        "Direct PostgreSQL capture joins the action, request, and changed row."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "pg_pool_connect_enterprise_core",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "explicit_transaction",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_pool"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_pg_pool_connect_enterprise_core",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "An acquired PostgreSQL pool client keeps the request correlation."
+        ]
+      },
+      "notes": [
+        "An acquired PostgreSQL pool client keeps the request correlation."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "mysql2_autocommit",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "mysql2"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_mysql2_autocommit",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "insert",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "The mysql2 driver adapter records the changed order row."
+        ]
+      },
+      "notes": [
+        "The mysql2 driver adapter records the changed order row."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "mssql_pool_autocommit",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "mssql_pool"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_mssql_pool_autocommit",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "The MSSQL pool adapter records output rows through its request object."
+        ]
+      },
+      "notes": [
+        "The MSSQL pool adapter records output rows through its request object."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "batched_statement_capture_gap",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "batched_statements",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "gapped",
+      "achieved": "gapped",
+      "groundTruth": {
+        "actionId": "action_batched_statement_capture_gap",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "requiredGaps": [
+          {
+            "surface": "db_diff",
+            "reason": "unparsed_sql"
+          }
+        ],
+        "notes": [
+          "A statement batch that cannot be classified records a database capture gap."
+        ]
+      },
+      "notes": [
+        "A statement batch that cannot be classified records a database capture gap."
+      ],
+      "completeness": {
+        "gapCount": 1,
+        "gapsBySurface": {
+          "db_diff": 1
+        },
+        "gapsByReason": {
+          "unparsed_sql": 1
+        },
+        "grade": "fragmentary"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 0,
+      "gaps": [
+        {
+          "surface": "db_diff",
+          "reason": "unparsed_sql"
+        }
+      ]
+    },
+    {
+      "id": "prisma_driver_layer_enterprise_core",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "prisma_driver_layer"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_prisma_driver_layer_enterprise_core",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "Prisma coverage uses emitted SQL through the PostgreSQL driver layer, not a live ORM integration."
+        ]
+      },
+      "notes": [
+        "Prisma coverage uses emitted SQL through the PostgreSQL driver layer, not a live ORM integration."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "drizzle_driver_layer",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "drizzle_driver_layer"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_drizzle_driver_layer",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "Drizzle coverage uses emitted SQL through the PostgreSQL driver layer, not a live ORM integration."
+        ]
+      },
+      "notes": [
+        "Drizzle coverage uses emitted SQL through the PostgreSQL driver layer, not a live ORM integration."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "knex_driver_layer",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "knex_driver_layer"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_knex_driver_layer",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "Knex coverage uses emitted SQL through the PostgreSQL driver layer, not a live ORM integration."
+        ]
+      },
+      "notes": [
+        "Knex coverage uses emitted SQL through the PostgreSQL driver layer, not a live ORM integration."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "bullmq_worker_enterprise_core",
+      "dimensions": {
+        "processShape": "bullmq_worker",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_pool"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_bullmq_worker_enterprise_core",
+        "requestId": "req_bullmq_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "A serialized worker payload is deserialized in a fresh worker scope before it writes."
+        ]
+      },
+      "notes": [
+        "A worker module accepts only the serialized queue payload, creates an independent event stream, and returns it for the harness to merge after execution."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "bullmq_worker_missing_context",
+      "dimensions": {
+        "processShape": "bullmq_worker",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "gapped",
+      "achieved": "gapped",
+      "groundTruth": {
+        "actionId": "action_bullmq_worker_missing_context",
+        "requestId": "req_bullmq_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "requiredGaps": [
+          {
+            "surface": "queue",
+            "reason": "missing_session_id"
+          }
+        ],
+        "notes": [
+          "A dropped worker context emits a queue capture gap and cannot complete the original join."
+        ]
+      },
+      "notes": [
+        "A missing worker context emits the required queue capture gap instead of joining the original request."
+      ],
+      "completeness": {
+        "gapCount": 1,
+        "gapsBySurface": {
+          "queue": 1
+        },
+        "gapsByReason": {
+          "missing_session_id": 1
+        },
+        "grade": "degraded"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": [
+        {
+          "surface": "queue",
+          "reason": "missing_session_id"
+        }
+      ]
+    },
+    {
+      "id": "webhook_fanout",
+      "dimensions": {
+        "processShape": "webhook_fanout",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_webhook_fanout",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "The fan out handler preserves the originating request correlation."
+        ]
+      },
+      "notes": [
+        "The fan out handler preserves the originating request correlation."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "gateway_traceparent_only_enterprise_core",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "gateway_traceparent_only",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_gateway_traceparent_only_enterprise_core",
+        "requestId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "The gateway strips custom correlation headers after receipt while traceparent resolves the backend request join."
+        ]
+      },
+      "notes": [
+        "The gateway strips custom correlation headers after receipt while traceparent resolves the backend request join."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "cors_cross_origin",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "cors_cross_origin",
+        "transactionPattern": "autocommit",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_cors_cross_origin",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "An allowed cross origin request keeps its correlation headers."
+        ]
+      },
+      "notes": [
+        "An allowed cross origin request keeps its correlation headers."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "explicit_transaction",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "explicit_transaction",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_explicit_transaction",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "Only the mutation in the transaction produces the row change evidence."
+        ]
+      },
+      "notes": [
+        "Only the mutation in the transaction produces the row change evidence."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "cte_upsert_corpus",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "cte_upsert_corpus",
+        "captureMode": "sdk_dev_session",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_cte_upsert_corpus",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          },
+          {
+            "op": "insert",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "Classified CTE and upsert statements produce request keyed row diffs."
+        ]
+      },
+      "notes": [
+        "Classified CTE and upsert statements produce request keyed row diffs."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 2,
+      "gaps": []
+    },
+    {
+      "id": "v3_production_trigger_enterprise_core",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "v3_production_trigger",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "full",
+      "achieved": "full",
+      "groundTruth": {
+        "actionId": "action_v3_production_trigger_enterprise_core",
+        "requestId": "req_m9z4x9_abcdefghijkl",
+        "sessionId": "ses_20260715_123456_abcdef123456",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "notes": [
+          "The real production fast finalize trigger processes a severe event; finalization is modeled as skipped because this deterministic harness has no session store."
+        ]
+      },
+      "notes": [
+        "The real production fast finalize trigger processes a severe event; finalization is modeled as skipped because this deterministic harness has no session store."
+      ],
+      "completeness": {
+        "gapCount": 0,
+        "gapsBySurface": {},
+        "gapsByReason": {},
+        "grade": "complete"
+      },
+      "linkedRequests": 1,
+      "databaseDiffs": 1,
+      "gaps": []
+    },
+    {
+      "id": "otlp_sessionless",
+      "dimensions": {
+        "processShape": "synchronous_service",
+        "edge": "direct",
+        "transactionPattern": "autocommit",
+        "captureMode": "otlp_sessionless",
+        "driverOrm": "pg_direct"
+      },
+      "expected": "gapped",
+      "achieved": "gapped",
+      "groundTruth": {
+        "requestId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "expectedRowChanges": [
+          {
+            "op": "update",
+            "table": "orders",
+            "pk": {
+              "id": 101
+            },
+            "before": null,
+            "after": {
+              "id": 101,
+              "status": "ready"
+            }
+          }
+        ],
+        "causalOrdering": {
+          "actionBeforeRequestStart": true,
+          "requestStartBeforeDatabaseDiff": true
+        },
+        "requiredGaps": [
+          {
+            "surface": "backend_request",
+            "reason": "header_stripped"
+          }
+        ],
+        "notes": [
+          "Sessionless telemetry retains its trace join and records the missing session coverage."
+        ]
+      },
+      "notes": [
+        "Sessionless telemetry retains its trace join and records the missing session coverage."
+      ],
+      "completeness": {
+        "gapCount": 1,
+        "gapsBySurface": {
+          "backend_request": 1
+        },
+        "gapsByReason": {
+          "header_stripped": 1
+        },
+        "grade": "degraded"
+      },
+      "linkedRequests": 0,
+      "databaseDiffs": 1,
+      "gaps": [
+        {
+          "surface": "backend_request",
+          "reason": "header_stripped"
+        }
+      ]
+    }
+  ]
+}

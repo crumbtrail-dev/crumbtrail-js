@@ -180,6 +180,28 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@25.9.5)(@vitest/coverage-v8@4.1.10)(happy-dom@17.6.3)(vite@7.3.6(@types/node@25.9.5)(terser@5.49.0)(yaml@2.9.0))
 
+  packages/topology-harness:
+    dependencies:
+      crumbtrail-core:
+        specifier: workspace:^
+        version: link:../core
+      crumbtrail-node:
+        specifier: workspace:^
+        version: link:../node
+    devDependencies:
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.9.5
+      tsup:
+        specifier: ^8.4.0
+        version: 8.5.1(postcss@8.5.18)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@25.9.5)(@vitest/coverage-v8@4.1.10)(happy-dom@17.6.3)(vite@7.3.6(@types/node@25.9.5)(terser@5.49.0)(yaml@2.9.0))
+
 packages:
 
   '@babel/code-frame@7.29.7':

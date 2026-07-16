@@ -31,6 +31,18 @@ export type {
   SessionSweepResult,
   SessionSweeperHandle,
 } from "./session-sweeper";
+export {
+  createFastFinalizeScheduler,
+  isHighSeverityEvent,
+  startFastFinalizer,
+} from "./fast-finalize";
+export type {
+  FastFinalizeHandle,
+  FastFinalizeOutcome,
+  FastFinalizeScheduler,
+  FastFinalizeSchedulerOptions,
+  FastFinalizerOptions,
+} from "./fast-finalize";
 export { buildSessionSummary } from "./session-summary";
 export type {
   SessionSummary,
@@ -90,6 +102,27 @@ export type {
   InstrumentPgClientOptions,
   StatementClassification,
 } from "./db";
+export {
+  buildBackendRequestStartEvent,
+  buildBackendRequestEndEvent,
+  buildBackendRequestErrorEvent,
+  resolveBackendRequestCorrelation,
+} from "./backend-events";
+export type {
+  BackendRequestEventInput,
+  BackendRequestEndEventInput,
+  BackendRequestErrorEventInput,
+  BackendRequestCorrelation,
+  BackendRequestHeaders,
+} from "./backend-events";
+export { buildLlmBundle, writeLlmBundle } from "./llm-bundle";
+export type {
+  LlmBundle,
+  LlmBundleCompleteness,
+  SessionIndexLike,
+  WriteLlmBundleInput,
+} from "./llm-bundle";
+export { postProcess } from "./post-process";
 export { inspectSession, formatInspection, InspectError } from "./inspect";
 export type {
   SessionInspection,
