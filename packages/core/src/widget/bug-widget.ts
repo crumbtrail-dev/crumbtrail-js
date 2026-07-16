@@ -17,7 +17,8 @@ export function mountWidget(logger: Crumbtrail): () => void {
   const trigger = document.createElement("button");
   trigger.className = "bl-trigger";
   trigger.innerHTML = BUG_SVG;
-  trigger.title = "Flag a bug (Ctrl+Shift+B)";
+  trigger.title = "Something went wrong. Attach a report.";
+  trigger.setAttribute("aria-label", "Something went wrong. Attach a report.");
   shadow.appendChild(trigger);
 
   // Popover
@@ -62,7 +63,7 @@ export function mountWidget(logger: Crumbtrail): () => void {
     statusEl.textContent = "Sending...";
 
     try {
-      const { bugId } = await (logger as any).flagBug({
+      const { bugId } = await logger.flag({
         note: noteInput.value || undefined,
       });
       statusEl.textContent = `Saved: ${bugId}`;

@@ -40,7 +40,7 @@ describe("keystrokeCollector", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].k).toBe("key");
-    expect(events[0].d.key).toBe("a");
+    expect(events[0].d.key).toBe("*");
     expect(events[0].d.code).toBe("KeyA");
     expect(events[0].d.dir).toBe("dn");
   });

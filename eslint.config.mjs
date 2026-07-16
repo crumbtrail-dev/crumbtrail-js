@@ -51,4 +51,11 @@ export default tseslint.config(
       "no-empty": "warn",
     },
   },
+  {
+    files: ["test-fixtures/installers/**/*.js"],
+    rules: {
+      // These installer fixtures intentionally exercise CommonJS projects.
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
 );
