@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventBus } from "../../event-bus";
-import { BROWSER_REDACTION_POLICY, REDACTED_VALUE } from "../../redaction";
+import { BROWSER_REDACTION_POLICY } from "../../redaction";
+import { maskText } from "../../masking";
 import {
   DEFAULT_CONFIG,
   type BugEvent,
@@ -144,7 +145,7 @@ describe("interactionCollector", () => {
 
     const inpEvents = events.filter((e) => e.k === "inp");
     expect(inpEvents).toHaveLength(1);
-    expect(inpEvents[0].d.val).toBe(REDACTED_VALUE);
+    expect(inpEvents[0].d.val).toBe(maskText("alice"));
     expect(inpEvents[0].d.valSummary).toMatchObject({
       kind: "input",
       action: "redacted",
@@ -178,7 +179,7 @@ describe("interactionCollector", () => {
     bus.flush();
 
     const inpEvents = events.filter((e) => e.k === "inp");
-    expect(inpEvents[0].d.val).toBe(REDACTED_VALUE);
+    expect(inpEvents[0].d.val).toBe(maskText("secret123"));
     expect(inpEvents[0].d.valSummary).toMatchObject({
       reason: "sensitive_input_value",
     });

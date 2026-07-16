@@ -37,11 +37,11 @@ That's the whole integration — capture runs in the background from there.
 
 ### Presets
 
-| Preset | Behaviour |
-| --- | --- |
+| Preset           | Behaviour                                                              |
+| ---------------- | ---------------------------------------------------------------------- |
 | `PRESET_PASSIVE` | Capture continuously and auto-flag on errors and signals. The default. |
-| `PRESET_LIGHT` | Leaner capture, less overhead. |
-| `PRESET_FULL` | Everything, for a heavy debugging session. |
+| `PRESET_LIGHT`   | Leaner capture, less overhead.                                         |
+| `PRESET_FULL`    | Everything, for a heavy debugging session.                             |
 
 ### Flagging a bug yourself
 
@@ -63,20 +63,56 @@ Also on the instance: `addEvent`, `registerStateProvider`, `setEnv`,
 
 ## Redaction is on by default
 
-Crumbtrail is meant to be pointed at real traffic, so scrubbing isn't opt-in.
-Tokens, cookies, storage values and sensitive input values are redacted before an
-event ever leaves the browser. See `BROWSER_REDACTION_POLICY` and the `redact*`
-helpers if you want to inspect or tighten the policy.
+Crumbtrail is meant to be pointed at real traffic, so scrubbing is not opt in.
+Tokens, cookies, storage values, page text, input values, and database row values
+are redacted before an event enters the browser buffer. See
+`BROWSER_REDACTION_POLICY` and the `redact*` helpers if you want to inspect or
+tighten the policy.
+
+## Production capture
+
+Page text, input values, keystrokes, clipboard content, DOM snapshots, and
+database row values are masked before they enter the local ring buffer. Add
+`data-crumbtrail-unmask` to one element when its text or value is safe to
+capture. Add `data-crumbtrail-block` to exclude an element and its descendants
+entirely.
+
+Remote capture policy can only add masking. It cannot globally unmask text or
+inputs. Setting `maskAllText` or `maskAllInputs` to `false` is a local build
+time developer choice and is not exposed through remote config.
+
+For consent managed applications, begin capture only after your consent manager
+grants permission:
+
+```ts
+const crumbtrail = Crumbtrail.init({
+  consentMode: "required",
+  configEndpoint: "https://capture.example.com/config",
+  projectKey: "project_123",
+});
+
+crumbtrail.consent(true);
+crumbtrail.identify({ accountId: "account_123", userId: "user_456" });
+await crumbtrail.flag();
+```
+
+Global Privacy Control is respected by default. Email shaped identifiers are
+discarded by `identify`.
+
+Set `flightRecorder: true` to buffer locally until an error, signal, widget
+action, or `flag()` triggers capture. The recorder adds the configured tail
+before finalizing the report. A cloud config response can disable capture with
+`killSwitch: true`; the SDK clears its buffer as soon as that response arrives.
 
 ## Related packages
 
-| Package | Use it for |
-| --- | --- |
-| [`crumbtrail`](https://www.npmjs.com/package/crumbtrail) | The `npx crumbtrail` setup wizard |
-| [`crumbtrail-node`](https://www.npmjs.com/package/crumbtrail-node) | Self-hosted server, Express middleware, MCP evidence tools |
-| [`crumbtrail-react`](https://www.npmjs.com/package/crumbtrail-react) | React error boundary and state-capture hook |
-| [`crumbtrail-react-native`](https://www.npmjs.com/package/crumbtrail-react-native) | React Native bindings |
-| [`crumbtrail-tauri`](https://www.npmjs.com/package/crumbtrail-tauri) | Tauri desktop bindings |
+| Package                                                                            | Use it for                                                 |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [`crumbtrail`](https://www.npmjs.com/package/crumbtrail)                           | The `npx crumbtrail` setup wizard                          |
+| [`crumbtrail-node`](https://www.npmjs.com/package/crumbtrail-node)                 | Self-hosted server, Express middleware, MCP evidence tools |
+| [`crumbtrail-react`](https://www.npmjs.com/package/crumbtrail-react)               | React error boundary and state-capture hook                |
+| [`crumbtrail-react-native`](https://www.npmjs.com/package/crumbtrail-react-native) | React Native bindings                                      |
+| [`crumbtrail-tauri`](https://www.npmjs.com/package/crumbtrail-tauri)               | Tauri desktop bindings                                     |
 
 ## Links
 

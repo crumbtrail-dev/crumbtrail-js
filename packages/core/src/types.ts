@@ -104,6 +104,9 @@ export interface BugReport {
   voiceNote?: string;
   url: string;
   userAgent: string;
+  /** Pseudonymous identifiers supplied with `identify`; email shaped values are never retained. */
+  accountId?: string;
+  userId?: string;
   tags?: string[];
   summary: {
     errorCount: number;
@@ -148,6 +151,7 @@ export interface CaptureGapEventData {
     | "missing_session_id"
     | "capture_exception"
     | "window_miss"
+    | "sampled_out"
     | "header_stripped";
   detail?: string;
   t: number;
@@ -283,6 +287,19 @@ export interface FlagBugOptions {
   voiceBlob?: Blob;
 }
 
+/** Pseudonymous identifiers that let a captured artifact join to a support ticket. */
+export interface CrumbtrailIdentity {
+  accountId?: string;
+  userId?: string;
+}
+
+/** Remote capture policy polling options. */
+export interface CaptureConfigPollingOptions {
+  endpoint: string;
+  projectKey: string;
+  intervalMs?: number;
+}
+
 export interface AddBugEventOptions {
   type: string;
   data: Record<string, unknown>;
@@ -320,6 +337,18 @@ export interface CrumbtrailConfig {
 
   // Interaction
   maskInputTypes: string[];
+  /**
+   * Mask DOM derived text before it enters the browser ring buffer. A false
+   * value is a local developer choice and is never available through remote
+   * capture policy.
+   */
+  maskAllText: boolean;
+  /**
+   * Mask input and keystroke values before they enter the browser ring buffer.
+   * A false value is a local developer choice and is never available through
+   * remote capture policy.
+   */
+  maskAllInputs: boolean;
   ignoreSelectors: string[];
   describeInteractionElement?: InteractionElementDescriptorFactory;
 
@@ -354,6 +383,26 @@ export interface CrumbtrailConfig {
   ringBufferMs: number;
   ringBufferMaxEvents: number;
 
+  // Production capture
+  /** Explicit consent prevents all buffering until `consent(true)` is called. */
+  consentMode: "implicit" | "required";
+  /** Treat Global Privacy Control as required consent until `consent(true)` is called. */
+  respectGpc: boolean;
+  /** Session sampling rate for capture candidates. */
+  captureSampleRate: number;
+  /** Trigger free baseline session sampling rate. */
+  baselineSampleRate: number;
+  /** Buffer locally until a trigger fires, then persist the window and tail. */
+  flightRecorder: boolean;
+  /** Capture duration after a flight recorder trigger before finalizing. */
+  flightRecorderTailMs: number;
+  /** Optional cloud capture config endpoint polled after initialization. */
+  configEndpoint?: string;
+  /** Project key sent with cloud capture config requests. */
+  projectKey?: string;
+  /** Config poll cadence when `configEndpoint` and `projectKey` are supplied. */
+  configPollIntervalMs: number;
+
   // Heartbeat
   heartbeat: boolean;
 
@@ -369,6 +418,16 @@ export interface CrumbtrailConfig {
 
   // Auto-flag on error: snapshot the ring buffer automatically when an err/rej event fires.
   autoFlagOnError: boolean;
+  /** Enable automatic capture for uncaught browser errors. */
+  autoFlagOnUncaughtError: boolean;
+  /** Enable automatic capture for unhandled promise rejections. */
+  autoFlagOnUnhandledRejection: boolean;
+  /** Enable automatic capture for instrumented HTTP 5xx responses. */
+  autoFlagOnRequest5xx: boolean;
+  /** Allow app code and the widget to call `flag()` as an explicit beacon. */
+  explicitBeacon: boolean;
+  /** Keep the server side pull policy available to heartbeat integrations. */
+  serverSidePull: boolean;
   // Quiet period after the last new error before the auto-flag fires. Doubles as post-roll:
   // the snapshot window then includes the cascade's aftermath, and a burst costs one report.
   autoFlagDebounceMs: number;
@@ -378,6 +437,11 @@ export interface CrumbtrailConfig {
   // Precognitive auto-flag: snapshot the ring buffer on behavioral leading indicators of a silent
   // failure (rage-clicks, retry storms) — before an error throws, or when none ever does. Opt-in.
   autoFlagOnSignals: boolean;
+  /** Per-signal switches let a remote policy enable only the selected behavioral triggers. */
+  autoFlagOnRageClick: boolean;
+  autoFlagOnRetryStorm: boolean;
+  autoFlagOnSlowResponse: boolean;
+  autoFlagOnAbandonedFlow: boolean;
   // Clicks on the same target within rageClickWindowMs that trip a rage-click auto-flag.
   rageClickThreshold: number;
   rageClickWindowMs: number;
@@ -449,6 +513,8 @@ export const DEFAULT_CONFIG: CrumbtrailConfig = {
   networkCorrelationAllowedOrigins: [],
 
   maskInputTypes: ["password", "email", "tel", "number", "search", "url"],
+  maskAllText: true,
+  maskAllInputs: true,
   ignoreSelectors: [],
 
   keystrokeThrottleMs: 0,
@@ -475,6 +541,14 @@ export const DEFAULT_CONFIG: CrumbtrailConfig = {
   ringBufferMs: 300_000,
   ringBufferMaxEvents: 50_000,
 
+  consentMode: "implicit",
+  respectGpc: true,
+  captureSampleRate: 1,
+  baselineSampleRate: 0,
+  flightRecorder: false,
+  flightRecorderTailMs: 60_000,
+  configPollIntervalMs: 60_000,
+
   heartbeat: true,
 
   environment: true,
@@ -485,10 +559,19 @@ export const DEFAULT_CONFIG: CrumbtrailConfig = {
   captureRawState: false,
 
   autoFlagOnError: false,
+  autoFlagOnUncaughtError: true,
+  autoFlagOnUnhandledRejection: true,
+  autoFlagOnRequest5xx: false,
+  explicitBeacon: true,
+  serverSidePull: false,
   autoFlagDebounceMs: 2000,
   autoFlagMaxPerSession: 10,
 
   autoFlagOnSignals: false,
+  autoFlagOnRageClick: true,
+  autoFlagOnRetryStorm: true,
+  autoFlagOnSlowResponse: true,
+  autoFlagOnAbandonedFlow: true,
   rageClickThreshold: 4,
   rageClickWindowMs: 1500,
   retryStormThreshold: 4,

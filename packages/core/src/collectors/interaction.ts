@@ -7,6 +7,12 @@ import {
   redactUrl,
   type RedactionMetadata,
 } from "../redaction";
+import {
+  isBlocked,
+  isUnmasked,
+  maskElementDescriptor,
+  maskText,
+} from "../masking";
 import { describeElement, now } from "../utils";
 
 function describeInteractionTarget(
@@ -16,7 +22,8 @@ function describeInteractionTarget(
   try {
     const descriptor =
       config.describeInteractionElement?.(target) ?? describeElement(target);
-    if (isRecord(descriptor)) return removeUndefined(descriptor);
+    if (isRecord(descriptor))
+      return maskElementDescriptor(target, removeUndefined(descriptor), config);
   } catch {
     // Keep interaction capture alive even if a page-specific descriptor probe fails.
   }
@@ -82,6 +89,7 @@ export function interactionCollector(
   const onClick = (e: MouseEvent) => {
     const target = e.target;
     if (!(target instanceof Element)) return;
+    if (isBlocked(target)) return;
 
     for (const sel of config.ignoreSelectors) {
       if (target.matches(sel)) return;
@@ -106,22 +114,26 @@ export function interactionCollector(
   // --- Input / Change ---
   const onInput = (e: Event) => {
     const target = e.target;
-    if (
-      !(
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement
-      )
-    )
+    if (!(
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    ))
       return;
+    if (isBlocked(target)) return;
 
     const el = describeInteractionTarget(target, config);
     const type = target instanceof HTMLInputElement ? target.type : undefined;
-    const val = redactInputValue(target.value, {
+    const redacted = redactInputValue(target.value, {
       name: target.name || undefined,
       type,
       path: "val",
     });
+    const val = isUnmasked(target)
+      ? { value: target.value, summary: undefined, metadata: undefined }
+      : config.maskAllInputs
+        ? { ...redacted, value: maskText(target.value) }
+        : redacted;
     const d: Record<string, unknown> = {
       el,
       val: val.value,
@@ -147,6 +159,7 @@ export function interactionCollector(
   const onSubmit = (e: Event) => {
     const target = e.target;
     if (!(target instanceof HTMLFormElement)) return;
+    if (isBlocked(target)) return;
 
     const el = describeInteractionTarget(target, config);
     const d: Record<string, unknown> = {
