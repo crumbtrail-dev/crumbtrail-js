@@ -53,7 +53,7 @@
     "vitest": "^4.1.10"
   },
   "license": "MIT",
-  "homepage": "https://crumbtrail.dev",
+  "homepage": "https://crumbtrail.ai",
   "bugs": {
     "url": "https://github.com/CrumbtrailDev/crumbtrail-cli/issues"
   },
@@ -65,7 +65,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "React Native and Expo SDK for Crumbtrail: capture errors, network, navigation and a view-tree snapshot around a bug. See https://crumbtrail.dev",
+  "description": "React Native and Expo SDK for Crumbtrail: capture errors, network, navigation and a view-tree snapshot around a bug. See https://crumbtrail.ai",
   "keywords": [
     "crumbtrail",
     "debugging",

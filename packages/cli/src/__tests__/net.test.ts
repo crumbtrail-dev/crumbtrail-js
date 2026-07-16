@@ -21,7 +21,7 @@ describe("resolveEndpoint", () => {
 
 describe("dashboardBase", () => {
   it("rewrites the default API host to the app host that serves the SPA", () => {
-    // The CLI talks to api.crumbtrail.dev, but the browser dashboard (mint key,
+    // The CLI talks to api.crumbtrail.ai, but the browser dashboard (mint key,
     // /bugs, session deep-links) lives on the app host — never send the user to
     // the API host, which never returns the SPA shell.
     expect(dashboardBase(DEFAULT_ENDPOINT)).toBe(DEFAULT_APP_URL);

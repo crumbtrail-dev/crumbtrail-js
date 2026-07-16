@@ -1,5 +1,9 @@
 import type { BugEvent } from "crumbtrail-core";
-import { startHeadlessSession, type HeadlessSession } from "./headless-session";
+import {
+  HeadlessRequestError,
+  startHeadlessSession,
+  type HeadlessSession,
+} from "./headless-session";
 
 /**
  * Canonical event kind emitted for an auto-captured backend error (crash or
@@ -22,6 +26,20 @@ export type AutoCaptureSource =
   | "uncaughtException"
   | "unhandledRejection"
   | "console.error";
+
+/**
+ * Stage of the ingest pipeline that failed. `session-start` is the initial
+ * `/api/session/start` handshake (a TLS/DNS/non-2xx failure here means the whole
+ * capture is dark); `record` is a later `/api/events` POST for a captured error.
+ */
+export type AutoCaptureErrorPhase = "session-start" | "record";
+
+/** Context handed to `onError` describing which send failed and why. */
+export interface AutoCaptureErrorContext {
+  phase: AutoCaptureErrorPhase;
+  /** The capture source, when the failure was recording a specific error. */
+  source?: AutoCaptureSource;
+}
 
 export interface AutoCaptureOptions {
   /** Ingest endpoint (baked into the injected snippet by the CLI). */
@@ -54,6 +72,28 @@ export interface AutoCaptureOptions {
    * the runner. Defaults to `process.exit`.
    */
   onCrashExit?: (code: number) => void;
+  /**
+   * Notified whenever an ingest send fails — the session handshake could not be
+   * reached (TLS/DNS/non-2xx) or a captured error's POST was rejected. Without
+   * this, such failures are swallowed and capture goes silently dark. Wire it to
+   * the host's logger to make ingest problems observable. It is called
+   * best-effort and its own throws are swallowed, so it can never break the host
+   * or the capture path. Avoid calling the patched `console.error` from here
+   * during the `record` phase — prefer a real logger.
+   */
+  onError?: (error: unknown, context: AutoCaptureErrorContext) => void;
+  /**
+   * When true (or when `CRUMBTRAIL_DEBUG` is set) and no `onError` is provided,
+   * ingest failures are logged to the original (unpatched) `console.error`.
+   * Defaults to false so a healthy install stays quiet.
+   */
+  debug?: boolean;
+  /**
+   * Injectable monotonic-ish clock (tests). Defaults to `Date.now`. Drives the
+   * lazy re-establishment backoff gate so tests can advance time deterministically
+   * without real timers.
+   */
+  nowImpl?: () => number;
 }
 
 export interface AutoCaptureHandle {
@@ -68,6 +108,18 @@ const MAX_STACK = 4000;
 // Hard ceiling for the crash flush: the exit waits at most this long for the
 // crash event's fetch to land, then exits(1) no matter what.
 const CRASH_FLUSH_MS = 150;
+// Lazy re-establishment backoff. When the ingest session is not live, the next
+// captured error tries to (re-)start it — but only after this backoff has elapsed
+// since the last failed attempt, so a persistently-down endpoint is not hammered.
+// Exponential from ~1s, capped at ~30s: 1s, 2s, 4s, 8s, 16s, 30s, 30s, …
+const REESTABLISH_BASE_MS = 1000;
+const REESTABLISH_CAP_MS = 30_000;
+// Upper bound on a server-requested `Retry-After` floor. A trusted server asking
+// us to wait a few minutes is honored, but an absurd (or hostile/buggy) value
+// like `Retry-After: 999999999` (~31 years) must not silently park capture until
+// the process restarts — clamp it so self-heal always resumes within a bounded
+// window.
+const RETRY_AFTER_MAX_MS = 5 * 60_000;
 
 /** Resolve after `ms`, without keeping the event loop alive for the timer. */
 function sleep(ms: number): Promise<void> {
@@ -107,6 +159,33 @@ export async function autoCapture(
   const proc = options.processImpl ?? process;
   const consoleRef = options.consoleImpl ?? console;
 
+  // The real console.error, captured before we patch it. The `debug` fallback
+  // logs through this so a `record`-phase failure can never re-enter the patched
+  // console.error and loop.
+  const originalConsoleError = consoleRef.error;
+  const debug = options.debug ?? isTruthyFlag(proc.env.CRUMBTRAIL_DEBUG);
+
+  // Surface an ingest failure that would otherwise be swallowed. Best-effort:
+  // its own throws are contained so diagnostics can never break the host.
+  const emitError = (
+    error: unknown,
+    context: AutoCaptureErrorContext,
+  ): void => {
+    try {
+      if (options.onError) {
+        options.onError(error, context);
+      } else if (debug) {
+        originalConsoleError.call(
+          consoleRef,
+          `[crumbtrail] ingest ${context.phase} failed`,
+          error,
+        );
+      }
+    } catch {
+      // Diagnostics must never throw back into the host application.
+    }
+  };
+
   if (options.loadEnv !== false) {
     try {
       const loader = (proc as unknown as { loadEnvFile?: (p?: string) => void })
@@ -119,47 +198,140 @@ export async function autoCapture(
   }
 
   const authToken = options.authToken ?? proc.env.CRUMBTRAIL_KEY;
+  const now = options.nowImpl ?? Date.now;
+  // Stable id reused across every (re-)establishment attempt so events correlate
+  // to one logical session even if the first handshake failed and a later one
+  // succeeds.
+  const stableSessionId = options.sessionId ?? generateSessionId();
 
+  // Re-establishment state. `session` is the live handle when the handshake has
+  // succeeded and is still believed good. `nextAttemptAt` is the backoff gate:
+  // a re-establish is only attempted once the clock reaches it. `establishing`
+  // dedups concurrent attempts so a burst of captures triggers at most one
+  // in-flight handshake.
   let session: HeadlessSession | undefined;
-  try {
-    session = await startHeadlessSession({
+  let consecutiveFailures = 0;
+  let nextAttemptAt = 0; // 0 => attempt immediately (boot / after success)
+  let establishing: Promise<HeadlessSession | undefined> | undefined;
+  let stopped = false;
+
+  const startSession = (): Promise<HeadlessSession> =>
+    startHeadlessSession({
       endpoint: options.endpoint,
-      sessionId: options.sessionId ?? generateSessionId(),
+      sessionId: stableSessionId,
       authToken,
       metadata: { ...options.metadata, capture: "auto" },
       fetchImpl: options.fetchImpl,
     });
-  } catch {
-    // Could not reach the ingest endpoint. Still install the hooks so the host's
-    // crash semantics stay intact; recording is simply a no-op.
-    session = undefined;
-  }
+
+  // Lazily (re-)establish the ingest session, bounded by the backoff gate.
+  // Returns the live session, or undefined when the gate is closed, an attempt is
+  // already in flight (awaited and shared), the handshake failed, or we've been
+  // stopped. A failure surfaces through `emitError({ phase: "session-start" })`
+  // and arms the backoff (respecting a server `Retry-After` as a floor) so the
+  // endpoint is not hammered — the NEXT capture after recovery lands.
+  const ensureSession = async (): Promise<HeadlessSession | undefined> => {
+    if (session) return session;
+    if (stopped) return undefined;
+    if (establishing) return establishing;
+    if (now() < nextAttemptAt) return undefined;
+
+    establishing = (async (): Promise<HeadlessSession | undefined> => {
+      try {
+        const started = await startSession();
+        if (stopped) return undefined;
+        session = started;
+        consecutiveFailures = 0;
+        nextAttemptAt = 0;
+        return session;
+      } catch (err) {
+        session = undefined;
+        consecutiveFailures += 1;
+        const backoff = Math.min(
+          REESTABLISH_BASE_MS * 2 ** (consecutiveFailures - 1),
+          REESTABLISH_CAP_MS,
+        );
+        const floor = Math.min(retryAfterMsOf(err) ?? 0, RETRY_AFTER_MAX_MS);
+        nextAttemptAt = now() + Math.max(backoff, floor);
+        emitError(err, { phase: "session-start" });
+        return undefined;
+      } finally {
+        establishing = undefined;
+      }
+    })();
+    return establishing;
+  };
+
+  // Boot: attempt the initial handshake. On failure the hooks still install so
+  // the host's crash semantics stay intact and a later capture can self-heal.
+  await ensureSession();
 
   let capturing = false;
+  const recordLive = (
+    live: HeadlessSession,
+    error: unknown,
+    source: AutoCaptureSource,
+  ): Promise<void> =>
+    live
+      .record(buildErrorEvent(error, source))
+      .catch((sendErr) => emitError(sendErr, { phase: "record", source }));
+
   // Best-effort record. Returns the in-flight record promise (already
   // `.catch`-guarded so it never rejects) so a crash handler can bound-flush it;
-  // returns undefined when there is nothing to await (no session / re-entrant).
+  // returns undefined when there is nothing to await (no session and no
+  // re-establish, or a re-entrant call).
+  //
+  // `allowReestablish` (default false) opts into lazy re-establishment: when the
+  // session is dark it first tries to (re-)start it behind the backoff gate, then
+  // records. The crash path passes false — re-establishing there risks the
+  // bounded exit ceiling, so a crash only records through an already-live session.
   const record = (
     error: unknown,
     source: AutoCaptureSource,
+    allowReestablish = false,
   ): Promise<void> | undefined => {
-    if (!session || capturing) return undefined;
-    capturing = true;
+    if (capturing) return undefined;
     try {
-      return session.record(buildErrorEvent(error, source)).catch(() => {});
+      if (session) {
+        capturing = true;
+        try {
+          return recordLive(session, error, source);
+        } finally {
+          capturing = false;
+        }
+      }
+      if (!allowReestablish || stopped) return undefined;
+      // Dark session: re-establish (backoff-gated) then record. `capturing` stays
+      // held for the whole async attempt so a burst of captures does not each
+      // spawn their own handshake.
+      capturing = true;
+      const pending = (async () => {
+        const live = await ensureSession();
+        if (live) await recordLive(live, error, source);
+      })();
+      void pending.finally(() => {
+        capturing = false;
+      });
+      return pending;
     } catch {
       // Capture must never throw back into the host application.
-      return undefined;
-    } finally {
       capturing = false;
+      return undefined;
     }
   };
 
   // Keep the exact original reference so stop() can restore it identically.
-  const originalError = consoleRef.error;
+  const originalError = originalConsoleError;
   const patchedError = (...args: unknown[]): void => {
     const errorArg = args.find((a) => a instanceof Error);
-    record(errorArg ?? args.map((a) => String(a)).join(" "), "console.error");
+    // The non-crash capture path opts into lazy re-establishment: if the session
+    // went dark at boot (or later), this is what heals it — the next logged error
+    // after the endpoint recovers re-starts the session and lands.
+    record(
+      errorArg ?? args.map((a) => String(a)).join(" "),
+      "console.error",
+      true,
+    );
     originalError.apply(consoleRef, args as []);
   };
   consoleRef.error = patchedError as typeof consoleRef.error;
@@ -209,9 +381,12 @@ export async function autoCapture(
   };
   proc.on("unhandledRejection", onUnhandled);
 
-  let stopped = false;
   const stop = (): void => {
     if (stopped) return;
+    // Setting `stopped` also cancels any pending re-establishment: the backoff
+    // gate is pull-based (no background timer to clear), so a captured error after
+    // stop() short-circuits and an in-flight handshake resolves to a discarded
+    // session instead of arming further retries.
     stopped = true;
     if (consoleRef.error === patchedError) {
       consoleRef.error = originalError as typeof consoleRef.error;
@@ -222,6 +397,26 @@ export async function autoCapture(
   };
 
   return { sessionId: session?.sessionId, stop };
+}
+
+/** Truthy for `1`/`true`/`yes`/`on` (case-insensitive); false for unset/empty. */
+function isTruthyFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * The server-requested backoff floor (ms) from a non-2xx `Retry-After`, when the
+ * error carries one. A transport failure (TLS/DNS) has none; returns undefined.
+ */
+function retryAfterMsOf(err: unknown): number | undefined {
+  if (
+    err instanceof HeadlessRequestError &&
+    typeof err.retryAfterMs === "number"
+  ) {
+    return err.retryAfterMs;
+  }
+  return undefined;
 }
 
 function generateSessionId(): string {

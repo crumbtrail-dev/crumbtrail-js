@@ -15,7 +15,7 @@ From your app's root:
 npx crumbtrail
 ```
 
-(Pre-npm-publish, the same wizard runs via `curl -fsSL https://app.crumbtrail.dev/install.sh | sh`,
+(Pre-npm-publish, the same wizard runs via `curl -fsSL https://app.crumbtrail.ai/install.sh | sh`,
 which resolves to `npx --yes <cli-tarball-url>` — the identical wizard, just
 fetched from the deploy instead of the npm registry.)
 
@@ -91,7 +91,7 @@ import { createReactNativeCrumbtrail } from "crumbtrail-react-native";
 
 createReactNativeCrumbtrail({
   config: {
-    httpEndpoint: "https://app.crumbtrail.dev", // or your self-host endpoint
+    httpEndpoint: "https://app.crumbtrail.ai", // or your self-host endpoint
     httpAuthToken: "<project api key>",
   },
 });
@@ -213,9 +213,9 @@ setup (skip with `--skip-verify`).
 
 ## Links
 
-- **Website** — https://crumbtrail.dev
-- **Docs** — https://crumbtrail.dev/docs
-- **How it works** — https://crumbtrail.dev/how-it-works
+- **Website** — https://crumbtrail.ai
+- **Docs** — https://crumbtrail.ai/docs
+- **How it works** — https://crumbtrail.ai/how-it-works
 - **Source** — https://github.com/CrumbtrailDev/crumbtrail-cli
 - **Issues** — https://github.com/CrumbtrailDev/crumbtrail-cli/issues
 

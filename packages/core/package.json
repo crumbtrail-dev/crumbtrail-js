@@ -1,7 +1,7 @@
 {
   "name": "crumbtrail-core",
   "version": "0.2.4",
-  "description": "Capture the console, network, DOM and state around a bug and hand it to a coding agent as evidence. Zero-dependency browser SDK. See https://crumbtrail.dev",
+  "description": "Capture the console, network, DOM and state around a bug and hand it to a coding agent as evidence. Zero-dependency browser SDK. See https://crumbtrail.ai",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -50,7 +50,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "clean": "rm -rf dist"
   },
-  "homepage": "https://crumbtrail.dev",
+  "homepage": "https://crumbtrail.ai",
   "bugs": {
     "url": "https://github.com/CrumbtrailDev/crumbtrail-cli/issues"
   }

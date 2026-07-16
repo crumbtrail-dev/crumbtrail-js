@@ -142,6 +142,14 @@ function makeDeps(h: HarnessOpts, over: Partial<WizardDeps> = {}): WizardDeps {
         ),
       };
     }) as unknown as WizardDeps["pollForServices"],
+    runPreflight: vi.fn(async () => {
+      h.steps.push("preflight");
+      return {
+        ok: true,
+        endpoint: "https://api.crumbtrail.ai",
+        stages: [],
+      };
+    }) as unknown as WizardDeps["runPreflight"],
     openBrowserFn: vi.fn(async () => true),
     ui,
     prompter: noopPrompter,
@@ -188,6 +196,79 @@ describe("parseArgs", () => {
       parseArgs(["node", "cli", "--workspace=packages/api"]).workspace,
     ).toBe("packages/api");
     expect(parseArgs(["node", "cli"]).workspace).toBeUndefined();
+  });
+
+  it("parses the verify subcommand with --key/--json (both flag forms)", () => {
+    const p = parseArgs([
+      "node",
+      "cli",
+      "verify",
+      "--endpoint",
+      "https://api.example",
+      "--key",
+      "ck_abc",
+      "--json",
+    ]);
+    expect(p).toMatchObject({
+      command: "verify",
+      endpoint: "https://api.example",
+      key: "ck_abc",
+      json: true,
+    });
+    expect(parseArgs(["node", "cli", "verify", "--key=ck_xyz"]).key).toBe(
+      "ck_xyz",
+    );
+    expect(parseArgs(["node", "cli"]).json).toBe(false);
+  });
+});
+
+describe("verify subcommand dispatch", () => {
+  it("runs the preflight (no TTY guard) and maps PASS to exit 0", async () => {
+    const h: HarnessOpts = { steps: [], isTTY: false };
+    const runPreflight = vi.fn(async () => ({
+      ok: true,
+      endpoint: "https://api.crumbtrail.ai",
+      stages: [
+        { stage: "dns" as const, status: "pass" as const, reason: "ok", ms: 1 },
+      ],
+    })) as unknown as WizardDeps["runPreflight"];
+    const deps = makeDeps(h, {
+      runPreflight,
+      env: { CRUMBTRAIL_KEY: "ck_env" },
+    });
+    const code = await runCli(["node", "cli", "verify"], deps);
+    expect(code).toBe(0);
+    expect(runPreflight).toHaveBeenCalledTimes(1);
+    // The ingest key from $CRUMBTRAIL_KEY became the probe credential.
+    expect(runPreflight).toHaveBeenCalledWith(
+      expect.objectContaining({
+        endpoint: "https://api.crumbtrail.ai",
+        probe: { kind: "ingestKey", key: "ck_env" },
+      }),
+    );
+  });
+
+  it("maps a FAIL preflight to a non-zero exit and emits JSON with --json", async () => {
+    const h: HarnessOpts = { steps: [], isTTY: false };
+    const { ui, lines } = captureUi();
+    const runPreflight = vi.fn(async () => ({
+      ok: false,
+      endpoint: "https://api.crumbtrail.ai",
+      stages: [
+        {
+          stage: "auth" as const,
+          status: "fail" as const,
+          reason: "bad or expired ingest key (HTTP 401)",
+          ms: 12,
+        },
+      ],
+    })) as unknown as WizardDeps["runPreflight"];
+    const deps = makeDeps(h, { runPreflight, ui, env: { CRUMBTRAIL_KEY: "ck" } });
+    const code = await runCli(["node", "cli", "verify", "--json"], deps);
+    expect(code).toBe(1);
+    const parsed = JSON.parse(lines.join("\n").trim());
+    expect(parsed.ok).toBe(false);
+    expect(parsed.stages[0].reason).toMatch(/bad or expired/);
   });
 });
 

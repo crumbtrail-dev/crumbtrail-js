@@ -1,6 +1,6 @@
 # crumbtrail
 
-The setup wizard for [Crumbtrail](https://crumbtrail.dev). It finds your app, wires
+The setup wizard for [Crumbtrail](https://crumbtrail.ai). It finds your app, wires
 in the SDK, and confirms the first event actually arrives — so you don't have to
 read an integration guide to get started.
 
@@ -31,6 +31,7 @@ shows you what it found, and wires the ones you pick.
 crumbtrail [options]        Run the setup wizard (detect → login → wire → verify)
 crumbtrail login           Log in and cache a token, nothing else
 crumbtrail logout          Delete the cached token
+crumbtrail verify          Preflight an endpoint + key (DNS, TLS, auth) — PASS/FAIL
 ```
 
 | Option | Description |
@@ -53,6 +54,92 @@ Outside a TTY the wizard refuses to guess. Pass `--yes` and an existing
 ```bash
 npx crumbtrail --yes --project prj_1234abcd --only web --skip-verify
 ```
+
+## Verify your setup / pre-deploy check
+
+`crumbtrail verify` runs a fast **synthetic preflight** against any environment's
+endpoint and key and returns PASS/FAIL in a few seconds — point it at prod from
+your laptop or CI *before* you deploy, to catch a wrong key, wrong endpoint, or a
+TLS cert/host mismatch that would otherwise leave you silently sending nothing.
+
+```bash
+crumbtrail verify --endpoint https://api.crumbtrail.ai --key <ingestKey>
+```
+
+It runs three staged checks, each reporting PASS/FAIL with the exact reason and
+elapsed time:
+
+1. **DNS** — the endpoint host resolves.
+2. **TLS** — the certificate is actually valid *for that host* (this is what
+   catches a `*.up.railway.app`-style cert/host mismatch).
+3. **Auth** — a real authenticated round-trip on the same path the SDK uses. A
+   `200` passes; `401`/`403` means a bad or expired key; `404` means the wrong
+   endpoint or path. The probe uses a synthetic `cli-check-` session the cloud
+   recognizes and refuses to persist, so it never creates a dashboard session.
+
+Unlike the setup wizard's verify step, this does **not** wait for live traffic —
+it actively probes the config. It is non-interactive (no prompts, no browser), so
+it is safe to run in CI.
+
+| Option | Description |
+| --- | --- |
+| `--endpoint <url>` | Endpoint to probe (else `$CRUMBTRAIL_BASE_URL`, else the default) |
+| `--key <ingestKey>` | Ingest key to probe with (else `$CRUMBTRAIL_KEY`, else the cached login token) |
+| `--project <id>` | Project id for the authenticated GET fallback when no key is given |
+| `--json` | Emit a machine-readable result (`{ ok, endpoint, stages[] }`) for CI |
+
+The exit code is **`0` when every runnable stage passes and non-zero on any
+failure**, so it drops straight into a CI gate:
+
+```bash
+crumbtrail verify --endpoint "$CRUMBTRAIL_BASE_URL" --key "$CRUMBTRAIL_KEY" --json \
+  || { echo "Crumbtrail preflight failed — not deploying"; exit 1; }
+```
+
+### Pre-deploy CI gate
+
+Run `verify` in your deploy pipeline to **confirm prod ingest works before you
+ship, instead of deploy-and-pray**. Because a broken config (wrong key, wrong
+endpoint, TLS cert/host mismatch) makes the preflight exit non-zero, the step —
+and the whole job — fails, and the deploy never runs.
+
+**GitHub Actions** — use the reusable composite action published from this repo,
+so every consumer references one shared gate instead of forking a snippet:
+
+```yaml
+- name: Verify Crumbtrail config
+  uses: CrumbtrailDev/crumbtrail-cli/.github/actions/verify@main
+  with:
+    endpoint: https://api.crumbtrail.ai
+    key: ${{ secrets.CRUMBTRAIL_INGEST_KEY }}
+    # project: prj_1234abcd    # optional
+    # version: 0.5.0           # pin once released; default is `latest`
+
+- name: Deploy
+  run: ./deploy.sh
+```
+
+If the preflight fails, the verify step fails and `Deploy` never runs. See
+[`.github/actions/verify`](../../.github/actions/verify) for the full input
+reference.
+
+**Any other CI (raw `npx`)** — the composite action is just a wrapper around the
+published CLI, so non-GitHub pipelines get the same gate directly:
+
+```bash
+npx --yes crumbtrail@latest verify \
+  --endpoint https://api.crumbtrail.ai \
+  --key "$CRUMBTRAIL_INGEST_KEY" \
+  --json \
+  || { echo "Crumbtrail preflight failed — not deploying"; exit 1; }
+```
+
+`--json` emits `{ ok, endpoint, stages[] }` for machine parsing; the exit code
+alone is enough to gate the pipeline.
+
+**The key must come from a CI secret, never inline.** Store it as
+`CRUMBTRAIL_INGEST_KEY` (or your secret name of choice) and reference it — the
+CLI and the composite action never echo the key.
 
 ## What it writes
 
@@ -79,10 +166,10 @@ for the three-line manual setup.
 
 ## Links
 
-- **Website** — https://crumbtrail.dev
-- **Docs** — https://crumbtrail.dev/docs
-- **How it works** — https://crumbtrail.dev/how-it-works
-- **Pricing** — https://crumbtrail.dev/pricing
+- **Website** — https://crumbtrail.ai
+- **Docs** — https://crumbtrail.ai/docs
+- **How it works** — https://crumbtrail.ai/how-it-works
+- **Pricing** — https://crumbtrail.ai/pricing
 - **Source** — https://github.com/CrumbtrailDev/crumbtrail-cli
 - **Issues** — https://github.com/CrumbtrailDev/crumbtrail-cli/issues
 

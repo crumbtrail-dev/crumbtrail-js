@@ -40,7 +40,7 @@ import { Crumbtrail, PRESET_PASSIVE } from "crumbtrail-core";
 
 Crumbtrail.init({
   ...PRESET_PASSIVE,
-  httpEndpoint: "https://api.crumbtrail.dev",
+  httpEndpoint: "https://api.crumbtrail.ai",
   httpAuthToken: process.env.CRUMBTRAIL_KEY,
 });
 ```

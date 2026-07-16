@@ -1,6 +1,6 @@
 # crumbtrail-react
 
-React bindings for [Crumbtrail](https://crumbtrail.dev): catch render errors with
+React bindings for [Crumbtrail](https://crumbtrail.ai): catch render errors with
 the session attached, and record component state so a bug report carries the state
 the component was actually in when it broke.
 
@@ -31,7 +31,7 @@ import { CrumbtrailErrorBoundary } from "crumbtrail-react";
 
 const crumbtrail = Crumbtrail.init({
   ...PRESET_PASSIVE,
-  httpEndpoint: "https://api.crumbtrail.dev",
+  httpEndpoint: "https://api.crumbtrail.ai",
   httpAuthToken: process.env.CRUMBTRAIL_KEY,
 });
 
@@ -76,9 +76,9 @@ value is safe.
 
 ## Links
 
-- **Website** — https://crumbtrail.dev
-- **Docs** — https://crumbtrail.dev/docs
-- **How it works** — https://crumbtrail.dev/how-it-works
+- **Website** — https://crumbtrail.ai
+- **Docs** — https://crumbtrail.ai/docs
+- **How it works** — https://crumbtrail.ai/how-it-works
 - **Source** — https://github.com/CrumbtrailDev/crumbtrail-cli
 - **Issues** — https://github.com/CrumbtrailDev/crumbtrail-cli/issues
 

@@ -37,7 +37,7 @@ export function gitInit(root: string, commitAll = true): void {
   const run = (args: string[]) =>
     execFileSync("git", args, { cwd: root, stdio: "ignore", env });
   run(["init"]);
-  run(["config", "user.email", "test@crumbtrail.dev"]);
+  run(["config", "user.email", "test@crumbtrail.ai"]);
   run(["config", "user.name", "Test"]);
   run(["config", "commit.gpgsign", "false"]);
   if (commitAll) {

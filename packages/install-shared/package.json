@@ -32,7 +32,7 @@
     "react": "^19.0.0"
   },
   "license": "MIT",
-  "homepage": "https://crumbtrail.dev",
+  "homepage": "https://crumbtrail.ai",
   "bugs": {
     "url": "https://github.com/CrumbtrailDev/crumbtrail-cli/issues"
   },
@@ -44,7 +44,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Shared Crumbtrail install recipes, OTLP facts and agent prompts used by the crumbtrail CLI and dashboard. See https://crumbtrail.dev",
+  "description": "Shared Crumbtrail install recipes, OTLP facts and agent prompts used by the crumbtrail CLI and dashboard. See https://crumbtrail.ai",
   "keywords": [
     "crumbtrail",
     "debugging",

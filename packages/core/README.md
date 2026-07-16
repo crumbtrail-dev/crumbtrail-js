@@ -1,6 +1,6 @@
 # crumbtrail-core
 
-The capture engine behind [Crumbtrail](https://crumbtrail.dev). It records what
+The capture engine behind [Crumbtrail](https://crumbtrail.ai). It records what
 actually happened around a bug — the console, the network calls, the DOM
 interactions, the state — and hands it over as evidence a coding agent can act on,
 instead of a screenshot and a vague repro.
@@ -28,7 +28,7 @@ import { Crumbtrail, PRESET_PASSIVE } from "crumbtrail-core";
 
 Crumbtrail.init({
   ...PRESET_PASSIVE,
-  httpEndpoint: "https://api.crumbtrail.dev",
+  httpEndpoint: "https://api.crumbtrail.ai",
   httpAuthToken: process.env.CRUMBTRAIL_KEY,
 });
 ```
@@ -80,9 +80,9 @@ helpers if you want to inspect or tighten the policy.
 
 ## Links
 
-- **Website** — https://crumbtrail.dev
-- **Docs** — https://crumbtrail.dev/docs
-- **How it works** — https://crumbtrail.dev/how-it-works
+- **Website** — https://crumbtrail.ai
+- **Docs** — https://crumbtrail.ai/docs
+- **How it works** — https://crumbtrail.ai/how-it-works
 - **Source** — https://github.com/CrumbtrailDev/crumbtrail-cli
 - **Issues** — https://github.com/CrumbtrailDev/crumbtrail-cli/issues
 

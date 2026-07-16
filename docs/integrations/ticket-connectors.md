@@ -176,7 +176,7 @@ minutes before it expires; each refresh returns a **new** refresh token and
 invalidates the old one (rotation), so there is nothing to renew by hand.
 
 Every outbound Atlassian/Jira request also carries a descriptive
-`User-Agent: Crumbtrail/… (integrations@crumbtrail.dev)` so the integration
+`User-Agent: Crumbtrail/… (integrations@crumbtrail.ai)` so the integration
 identifies its source transparently, as Atlassian's guidance requires.
 
 | Authorization state                                      | Lifetime while used                                                                             | How it dies                                                                                                      | Renewal                                                                                                                                |

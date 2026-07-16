@@ -5,20 +5,20 @@
 
 /**
  * Default cloud endpoint. The CLI talks to the dedicated API host, NOT the app
- * host — `app.crumbtrail.dev` serves the browser dashboard, `api.crumbtrail.dev`
+ * host — `app.crumbtrail.ai` serves the browser dashboard, `api.crumbtrail.ai`
  * serves the CLI/ingest API (both are the same service, split by Host header;
  * the API host never returns the SPA shell). This is the ONLY hardcoded
  * endpoint; `--endpoint` and CRUMBTRAIL_BASE_URL both override it. If this URL is
  * ever wrong, the fix is here — never guess elsewhere.
  */
-export const DEFAULT_ENDPOINT = "https://api.crumbtrail.dev";
+export const DEFAULT_ENDPOINT = "https://api.crumbtrail.ai";
 
 /**
  * Default browser dashboard host. The CLI hits the API host (DEFAULT_ENDPOINT),
  * but user-facing links — mint the key, open the dashboard, session deep-links —
  * must point at the app host, which is the one that serves the SPA shell.
  */
-export const DEFAULT_APP_URL = "https://app.crumbtrail.dev";
+export const DEFAULT_APP_URL = "https://app.crumbtrail.ai";
 
 /** Strip trailing slashes so `${base}/api/...` never doubles up. */
 export function normalizeBase(base: string): string {

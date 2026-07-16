@@ -201,9 +201,9 @@ describe("otlp guide", () => {
     renderOtlpGuide({
       stack: "rails",
       serviceName: "payments",
-      endpoint: "https://cloud.crumbtrail.dev",
+      endpoint: "https://cloud.crumbtrail.ai",
       snippet:
-        "OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.crumbtrail.dev/v1/traces",
+        "OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.crumbtrail.ai/v1/traces",
       agentPrompt: "Wire this Rails app's OTLP exporter to Crumbtrail.",
     });
 

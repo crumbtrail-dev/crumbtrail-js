@@ -37,7 +37,7 @@
     "vitest": "^4.1.10"
   },
   "license": "MIT",
-  "homepage": "https://crumbtrail.dev",
+  "homepage": "https://crumbtrail.ai",
   "bugs": {
     "url": "https://github.com/CrumbtrailDev/crumbtrail-cli/issues"
   },
@@ -49,7 +49,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Tauri v2 plugin for Crumbtrail: capture desktop app sessions over native IPC, no server process required. See https://crumbtrail.dev",
+  "description": "Tauri v2 plugin for Crumbtrail: capture desktop app sessions over native IPC, no server process required. See https://crumbtrail.ai",
   "keywords": [
     "crumbtrail",
     "debugging",

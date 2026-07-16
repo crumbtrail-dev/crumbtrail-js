@@ -37,7 +37,7 @@ listing) and only needed for public, un-gated distribution.
    {PUBLIC_BASE_URL}/api/connectors/jira/oauth/callback
    ```
 
-   e.g. `https://app.crumbtrail.dev/api/connectors/jira/oauth/callback`. It must
+   e.g. `https://app.crumbtrail.ai/api/connectors/jira/oauth/callback`. It must
    byte-match `callbackUrl()` in `packages/cloud/src/routes/oauth-routes.ts`, or
    the token exchange fails.
 
@@ -53,7 +53,7 @@ CRUMBTRAIL_ATLASSIAN_CLIENT_ID=<client id>
 CRUMBTRAIL_ATLASSIAN_CLIENT_SECRET=<client secret>
 # Also required for the OAuth flow + sealing tenant tokens at rest:
 CONNECTOR_SECRETS_KEY=<32-byte hex>   # openssl rand -hex 32
-PUBLIC_BASE_URL=https://app.crumbtrail.dev
+PUBLIC_BASE_URL=https://app.crumbtrail.ai
 ```
 
 Without `CRUMBTRAIL_ATLASSIAN_CLIENT_ID/SECRET` the OAuth start/callback routes

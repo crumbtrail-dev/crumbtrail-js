@@ -108,7 +108,10 @@ export {
   createCrumbtrailExpressErrorMiddleware,
   createCrumbtrailExpressMiddleware,
 } from "./express";
-export { startHeadlessSession } from "./headless-session";
+export {
+  HeadlessRequestError,
+  startHeadlessSession,
+} from "./headless-session";
 export type {
   HeadlessSession,
   HeadlessSessionOptions,
@@ -343,6 +346,8 @@ export type {
 // Append-only block. Do not reorder the exports above.
 export { autoCapture, AUTO_CAPTURE_ERROR_EVENT } from "./auto-capture";
 export type {
+  AutoCaptureErrorContext,
+  AutoCaptureErrorPhase,
   AutoCaptureHandle,
   AutoCaptureOptions,
   AutoCaptureSource,

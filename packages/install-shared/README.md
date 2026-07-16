@@ -1,6 +1,6 @@
 # crumbtrail-install-shared
 
-Internal building block for [Crumbtrail](https://crumbtrail.dev). It holds the
+Internal building block for [Crumbtrail](https://crumbtrail.ai). It holds the
 install recipes, OTLP facts and agent prompts that the `crumbtrail` CLI and the
 Crumbtrail dashboard both read, so the setup instructions you see in your terminal
 and the ones you see in the browser can't drift apart.
@@ -27,8 +27,8 @@ it — not because it's a useful standalone API. It has no stability guarantees.
 
 ## Links
 
-- **Website** — https://crumbtrail.dev
-- **Docs** — https://crumbtrail.dev/docs
+- **Website** — https://crumbtrail.ai
+- **Docs** — https://crumbtrail.ai/docs
 - **Source** — https://github.com/CrumbtrailDev/crumbtrail-cli
 - **Issues** — https://github.com/CrumbtrailDev/crumbtrail-cli/issues
 

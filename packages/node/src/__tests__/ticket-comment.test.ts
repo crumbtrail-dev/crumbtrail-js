@@ -3,7 +3,7 @@ import { buildAdvisoryComment } from "../ticket/comment";
 import type { AdfNode } from "../ticket/comment";
 
 const BUNDLE_URL =
-  "https://app.crumbtrail.dev/api/bundles/bnd_deadbeef01234567";
+  "https://app.crumbtrail.ai/api/bundles/bnd_deadbeef01234567";
 
 /** Recursively collect every `text` string in an ADF tree. */
 function allText(node: unknown): string[] {

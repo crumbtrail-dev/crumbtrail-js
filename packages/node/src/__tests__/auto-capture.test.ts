@@ -326,6 +326,366 @@ describe("autoCapture", () => {
     );
   });
 
+  it("onError surfaces a session-start failure (endpoint unreachable / bad cert)", async () => {
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const onError = vi.fn();
+    // session/start rejects, mirroring a TLS/DNS failure or a non-2xx ingest.
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("SSL certificate problem");
+    }) as unknown as typeof fetch;
+
+    const handle = track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl: { error: vi.fn() },
+        fetchImpl,
+        onError,
+      }),
+    );
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    const [error, context] = onError.mock.calls[0];
+    expect((error as Error).message).toContain("SSL certificate problem");
+    expect(context).toEqual({ phase: "session-start" });
+    // Hooks still installed, but the session is dark (no recording).
+    expect(proc.listenerCount("uncaughtException")).toBe(1);
+    expect(handle.sessionId).toBeUndefined();
+  });
+
+  it("onError surfaces a record failure (events POST rejected)", async () => {
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const onError = vi.fn();
+    // session/start succeeds so hooks install, but the events POST is rejected.
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/api/session/start")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response("nope", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl: { error: vi.fn() },
+        fetchImpl,
+        onError,
+      }),
+    );
+
+    proc.emit("unhandledRejection", new Error("boom"), Promise.resolve());
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onError).toHaveBeenCalled();
+    const recordCall = onError.mock.calls.find(
+      ([, ctx]) => (ctx as { phase: string }).phase === "record",
+    );
+    expect(recordCall).toBeDefined();
+    expect((recordCall![1] as { source: string }).source).toBe(
+      "unhandledRejection",
+    );
+  });
+
+  it("debug logs a session-start failure via the original (unpatched) console.error", async () => {
+    const proc = makeFakeProcess({
+      env: { CRUMBTRAIL_KEY: "k", CRUMBTRAIL_DEBUG: "1" },
+    });
+    const originalError = vi.fn();
+    const consoleImpl = { error: originalError };
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+      }),
+    );
+
+    // Logged through the reference captured before patching — not the patched
+    // console.error — so a failure can never recurse through capture.
+    expect(originalError).toHaveBeenCalledWith(
+      "[crumbtrail] ingest session-start failed",
+      expect.any(Error),
+    );
+  });
+
+  it("stays quiet on failure when neither onError nor debug is set", async () => {
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const originalError = vi.fn();
+    const consoleImpl = { error: originalError };
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("unreachable");
+    }) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+      }),
+    );
+
+    // No diagnostic noise for a healthy-by-default install.
+    expect(originalError).not.toHaveBeenCalled();
+  });
+
+  const startCountOf = (calls: FetchCall[]): number =>
+    calls.filter((c) => c.url.endsWith("/api/session/start")).length;
+
+  it("self-heals: a dark boot session recovers on a later console.error once the endpoint returns", async () => {
+    let clock = 1000;
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const consoleImpl = { error: vi.fn() };
+    const calls: FetchCall[] = [];
+    let healthy = false;
+    // session/start fails until `healthy` flips (endpoint recovers); /api/events
+    // always succeeds so a re-established session's record lands.
+    const fetchImpl = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        if (String(url).endsWith("/api/session/start") && !healthy) {
+          throw new Error("ECONNREFUSED");
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      },
+    ) as unknown as typeof fetch;
+
+    const handle = track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+        nowImpl: () => clock,
+      }),
+    );
+
+    // Boot handshake failed: session is dark, exactly one attempt so far.
+    expect(handle.sessionId).toBeUndefined();
+    expect(startCountOf(calls)).toBe(1);
+
+    // Endpoint recovers; advance the clock past the ~1s backoff gate.
+    healthy = true;
+    clock += 2000;
+
+    // The next captured error lazily re-establishes the session and lands — no
+    // redeploy needed.
+    consoleImpl.error(new Error("late failure"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(startCountOf(calls)).toBe(2);
+    const events = eventsFrom(calls);
+    const healed = events.find(
+      (e) => e.k === AUTO_CAPTURE_ERROR_EVENT && e.d.source === "console.error",
+    );
+    expect(healed).toBeDefined();
+    expect((healed!.d.error as { message: string }).message).toBe(
+      "late failure",
+    );
+  });
+
+  it("backoff gate: repeated captures inside the window do not spam session-start attempts", async () => {
+    let clock = 1000;
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const consoleImpl = { error: vi.fn() };
+    const calls: FetchCall[] = [];
+    // Endpoint stays down: every session/start rejects.
+    const fetchImpl = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        throw new Error("still down");
+      },
+    ) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+        nowImpl: () => clock,
+      }),
+    );
+
+    // Boot attempt only.
+    expect(startCountOf(calls)).toBe(1);
+
+    // A burst of captures with the clock frozen inside the backoff window makes
+    // NO further handshake attempts.
+    for (let i = 0; i < 5; i++) {
+      consoleImpl.error(new Error(`e${i}`));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(startCountOf(calls)).toBe(1);
+
+    // Once the clock moves past the backoff, exactly one new attempt is made.
+    clock += 60_000;
+    consoleImpl.error(new Error("after-window"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(startCountOf(calls)).toBe(2);
+  });
+
+  it("respects a Retry-After header as the backoff floor before re-establishing", async () => {
+    let clock = 1000;
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const consoleImpl = { error: vi.fn() };
+    const calls: FetchCall[] = [];
+    // 503 + Retry-After: 120s. The exponential base backoff (~1s) is far shorter,
+    // so the server floor must win.
+    const fetchImpl = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response("busy", {
+          status: 503,
+          headers: { "retry-after": "120" },
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+        nowImpl: () => clock,
+      }),
+    );
+
+    expect(startCountOf(calls)).toBe(1);
+
+    // 10s later: past the ~1s exponential backoff, but under the 120s floor.
+    clock += 10_000;
+    consoleImpl.error(new Error("too soon"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(startCountOf(calls)).toBe(1);
+
+    // Past the Retry-After floor: a new attempt is allowed.
+    clock += 120_000;
+    consoleImpl.error(new Error("now allowed"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(startCountOf(calls)).toBe(2);
+  });
+
+  it("clamps an absurd Retry-After so capture is not parked indefinitely", async () => {
+    let clock = 1000;
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const consoleImpl = { error: vi.fn() };
+    const calls: FetchCall[] = [];
+    // A hostile/buggy server asks us to wait ~31 years. Without a clamp this would
+    // park self-heal until process restart; the clamp bounds it to a few minutes.
+    const fetchImpl = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response("busy", {
+          status: 503,
+          headers: { "retry-after": "999999999" },
+        });
+      },
+    ) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+        nowImpl: () => clock,
+      }),
+    );
+
+    expect(startCountOf(calls)).toBe(1);
+
+    // Just over the clamp ceiling (5 min): a new attempt is allowed rather than
+    // being blocked for the ~31 years the header nominally requested.
+    clock += 5 * 60_000 + 1000;
+    consoleImpl.error(new Error("after clamp window"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(startCountOf(calls)).toBe(2);
+  });
+
+  it("crash path with a dark session still exits(1) within the bound and never re-establishes", async () => {
+    let clock = 1000;
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const onCrashExit = vi.fn();
+    const calls: FetchCall[] = [];
+    const fetchImpl = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        throw new Error("down");
+      },
+    ) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl: { error: vi.fn() },
+        fetchImpl,
+        onCrashExit,
+        nowImpl: () => clock,
+      }),
+    );
+
+    expect(startCountOf(calls)).toBe(1); // boot attempt only
+
+    // Advance well past the backoff so a re-establish WOULD be permitted if the
+    // crash path tried one — it must not, to stay inside the bounded exit.
+    clock += 60_000;
+    const started = Date.now();
+    proc.emit("uncaughtException", new Error("boom"));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(onCrashExit).toHaveBeenCalledWith(1);
+    expect(Date.now() - started).toBeLessThan(500);
+    // No re-establish on the crash path: still just the boot attempt.
+    expect(startCountOf(calls)).toBe(1);
+  });
+
+  it("onError fires again when a lazy re-establish attempt also fails", async () => {
+    let clock = 1000;
+    const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
+    const consoleImpl = { error: vi.fn() };
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("still unreachable");
+    }) as unknown as typeof fetch;
+
+    track(
+      await autoCapture({
+        endpoint: ENDPOINT,
+        processImpl: proc,
+        consoleImpl,
+        fetchImpl,
+        onError,
+        nowImpl: () => clock,
+      }),
+    );
+
+    // Boot failure surfaced once.
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0][1] as { phase: string }).phase).toBe(
+      "session-start",
+    );
+
+    // Past the backoff, a capture triggers a re-establish that also fails —
+    // surfaced again with the same phase.
+    clock += 60_000;
+    consoleImpl.error(new Error("trigger re-establish"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect((onError.mock.calls[1][1] as { phase: string }).phase).toBe(
+      "session-start",
+    );
+  });
+
   it("restores console.error and removes hooks on stop()", async () => {
     const proc = makeFakeProcess({ env: { CRUMBTRAIL_KEY: "k" } });
     const originalError = vi.fn();

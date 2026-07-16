@@ -45,7 +45,7 @@ export class TicketError extends Error {
  * not churn every release — it identifies the source, not an exact build.
  */
 export const CRUMBTRAIL_USER_AGENT =
-  "Crumbtrail/0.1 (+https://crumbtrail.dev; integrations@crumbtrail.dev)";
+  "Crumbtrail/0.1 (+https://crumbtrail.ai; integrations@crumbtrail.ai)";
 
 /** Strip query params and userinfo from a url before it can reach a log or error message. */
 function sanitizeUrl(u: string): string {

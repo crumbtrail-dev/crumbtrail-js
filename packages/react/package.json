@@ -38,7 +38,7 @@
     "vitest": "^4.1.10"
   },
   "license": "MIT",
-  "homepage": "https://crumbtrail.dev",
+  "homepage": "https://crumbtrail.ai",
   "bugs": {
     "url": "https://github.com/CrumbtrailDev/crumbtrail-cli/issues"
   },
@@ -50,7 +50,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "React bindings for Crumbtrail: an error boundary that captures the session, and a hook that records component state with a bug report. See https://crumbtrail.dev",
+  "description": "React bindings for Crumbtrail: an error boundary that captures the session, and a hook that records component state with a bug report. See https://crumbtrail.ai",
   "keywords": [
     "crumbtrail",
     "debugging",

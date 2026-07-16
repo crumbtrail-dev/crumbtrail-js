@@ -1,6 +1,6 @@
 # crumbtrail-tauri
 
-Tauri v2 plugin for [Crumbtrail](https://crumbtrail.dev). Replaces the HTTP transport with native IPC — no separate server process needed.
+Tauri v2 plugin for [Crumbtrail](https://crumbtrail.ai). Replaces the HTTP transport with native IPC — no separate server process needed.
 
 ## Install
 
@@ -106,9 +106,9 @@ crumbtrail-server --output ~/Library/Application\ Support/<bundle-id>/crumbtrail
 
 ## Links
 
-- **Website** — https://crumbtrail.dev
-- **Docs** — https://crumbtrail.dev/docs
-- **How it works** — https://crumbtrail.dev/how-it-works
+- **Website** — https://crumbtrail.ai
+- **Docs** — https://crumbtrail.ai/docs
+- **How it works** — https://crumbtrail.ai/how-it-works
 - **Source** — https://github.com/CrumbtrailDev/crumbtrail-cli
 - **Issues** — https://github.com/CrumbtrailDev/crumbtrail-cli/issues
 
