@@ -3,13 +3,76 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const cliPath = path.join(packageRoot, "dist", "cli.cjs");
+const distCjsPath = path.join(packageRoot, "dist", "index.cjs");
+const distEsmPath = path.join(packageRoot, "dist", "index.js");
 const timeoutMs = 8_000;
+
+/**
+ * The hosted cloud namespace-imports crumbtrail-node and reads
+ * NODE_CONTRACT_CAPABILITIES to decide whether the installed contract supports
+ * the tenant context factory and the provider neutral ticket comment. It gates
+ * on `=== true` and fails closed on anything else, so a bundler that tree
+ * shakes or reshapes the marker would silently disable those features with a
+ * green build. Assert the built dist in BOTH formats a consumer can load.
+ */
+const EXPECTED_NODE_CONTRACT_CAPABILITIES = {
+  tenantContextFactory: true,
+  ticketComment: true,
+};
+
+function assertCapabilityMarker(format, modulePath, namespace) {
+  const marker = namespace?.NODE_CONTRACT_CAPABILITIES;
+  if (!marker) {
+    throw new Error(
+      `${format} dist (${path.relative(packageRoot, modulePath)}) does not export NODE_CONTRACT_CAPABILITIES`,
+    );
+  }
+  for (const [capability, expected] of Object.entries(
+    EXPECTED_NODE_CONTRACT_CAPABILITIES,
+  )) {
+    if (marker[capability] !== expected) {
+      throw new Error(
+        `${format} dist NODE_CONTRACT_CAPABILITIES.${capability} is ${JSON.stringify(marker[capability])}, expected ${JSON.stringify(expected)} (the cloud gates on === true)`,
+      );
+    }
+  }
+  const unexpected = Object.keys(marker).filter(
+    (key) => !(key in EXPECTED_NODE_CONTRACT_CAPABILITIES),
+  );
+  if (unexpected.length > 0) {
+    throw new Error(
+      `${format} dist NODE_CONTRACT_CAPABILITIES has unexpected keys: ${unexpected.join(", ")}`,
+    );
+  }
+  return marker;
+}
+
+async function assertBuiltCapabilityMarker() {
+  await fs.access(distCjsPath);
+  await fs.access(distEsmPath);
+
+  const cjs = assertCapabilityMarker(
+    "CJS",
+    distCjsPath,
+    createRequire(import.meta.url)(distCjsPath),
+  );
+  const esm = assertCapabilityMarker(
+    "ESM",
+    distEsmPath,
+    await import(pathToFileURL(distEsmPath).href),
+  );
+
+  console.log(
+    `CRUMBTRAIL_NODE_CONTRACT_MARKER_PASS cjs=${JSON.stringify(cjs)} esm=${JSON.stringify(esm)}`,
+  );
+}
 
 function boundedTail(value, max = 1_200) {
   if (value.length <= max) return value;
@@ -118,6 +181,7 @@ async function assertDegradedOutputDir(healthUrl, outputDir, headers = {}) {
 
 async function main() {
   await fs.access(cliPath);
+  await assertBuiltCapabilityMarker();
 
   const tmpRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "crumbtrail-package-runtime-"),

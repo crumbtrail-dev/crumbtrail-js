@@ -137,15 +137,26 @@ export class RemoteMcpReadStore implements McpReadStore {
     return `/api/agent/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(name)}`;
   }
 
+  /**
+   * Stats an artifact with a GET that is discarded after the headers arrive.
+   *
+   * The agent router answers GET only and rejects every other method at entry,
+   * so a HEAD stat can never succeed against it. fetch() resolves at the
+   * headers, so the caller still only pays for the header round trip — but the
+   * body MUST be cancelled here rather than buffered, otherwise a stalled or
+   * oversized artifact would hang the stat or hold the socket open.
+   */
   private async fetchHead(path: string): Promise<Response | undefined> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await globalThis.fetch(`${this.baseUrl}${path}`, {
-        method: "HEAD",
+        method: "GET",
         headers: { Authorization: `Bearer ${this.token}` },
         signal: controller.signal,
       });
+      // Headers are all this stat consumes; drop the body without reading it.
+      void response.body?.cancel().catch(() => undefined);
       return response.status === 200 ? response : undefined;
     } catch {
       return undefined;

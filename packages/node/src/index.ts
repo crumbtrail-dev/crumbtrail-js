@@ -409,3 +409,12 @@ export type {
   OtlpResourceSpans,
   OtlpResourceLogs,
 } from "./otel-adapter";
+
+// ── Node contract capability marker ──────────────────────────────────────────
+// Append-only block. Do not reorder the exports above.
+// The hosted cloud namespace-imports this package and reads
+// NODE_CONTRACT_CAPABILITIES to decide whether the installed contract supports
+// the tenant context factory and the provider neutral ticket comment. It fails
+// closed when the marker is absent, so this re-export is load bearing and must
+// survive bundling in both the ESM and CJS dist outputs.
+export { NODE_CONTRACT_CAPABILITIES } from "./node-contract-capabilities";

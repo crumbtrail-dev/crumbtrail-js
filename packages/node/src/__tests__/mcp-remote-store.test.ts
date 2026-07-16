@@ -181,14 +181,8 @@ function startMockCloud({
         return;
       }
       if (artifactResponse === "stalled" && name === "index.json") {
-        if (req.method === "HEAD") {
-          res.writeHead(200, {
-            "content-type": "application/json",
-            "transfer-encoding": "chunked",
-          });
-          res.end();
-          return;
-        }
+        // The real agent router answers GET only, so the mock has no HEAD
+        // branch: the stat and the read both take this stalled GET path.
         res.writeHead(200, { "content-type": "application/json" });
         res.write('{"id":');
         return;
@@ -366,13 +360,18 @@ describe("MCP remote read store", () => {
         request.path.endsWith("/artifacts/candidates.json"),
       ),
     ).toBe(false);
+    // The agent router rejects every non-GET method at entry, so the artifact
+    // stat must go out as a GET and no HEAD may ever be attempted.
     expect(
       mock.requests.some(
         (request) =>
-          request.method === "HEAD" &&
+          request.method === "GET" &&
           request.path.endsWith("/artifacts/index.json"),
       ),
     ).toBe(true);
+    expect(
+      mock.requests.some((request) => request.method === "HEAD"),
+    ).toBe(false);
   });
 
   it("returns an empty list when the session response body stalls", async () => {
@@ -424,14 +423,30 @@ describe("MCP remote read store", () => {
 
   it("times out stalled artifact reads and the stat fallback", async () => {
     mock = await startMockCloud({ artifactResponse: "stalled" });
+    const timeoutMs = 25;
     const store = new RemoteMcpReadStore({
       baseUrl: mock.baseUrl,
       token: TOKEN,
-      timeoutMs: 25,
+      timeoutMs,
     });
 
     await expect(store.readArtifact(SESSION_ID, "index.json")).resolves.toBeUndefined();
+
+    // The stalled response carries no content-length, so the stat probe falls
+    // through to the bounded byteLength read, which can only end at the
+    // deadline. Asserting the elapsed time keeps this from passing vacuously:
+    // a stat that gave up early (or never issued the fallback) would return
+    // undefined too, but would not have waited out the timeout.
+    mock.requests.length = 0;
+    const startedAt = Date.now();
     await expect(store.statArtifact(SESSION_ID, "index.json")).resolves.toBeUndefined();
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(timeoutMs);
+
+    const statRequests = mock.requests.filter((request) =>
+      request.path.endsWith("/artifacts/index.json"),
+    );
+    expect(statRequests.length).toBe(2);
+    expect(statRequests.every((request) => request.method === "GET")).toBe(true);
   });
 
   it("rejects an advertised oversized body without waiting for it", async () => {
