@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Symptom } from "crumbtrail-core";
 import {
+  DEFAULT_MATCH_MARGIN,
   DEFAULT_MATCH_THRESHOLD,
+  locateAndAssemble,
+  locateEvidence,
   locateIncident,
   locatedEvidence,
   symptomProfile,
@@ -37,7 +40,7 @@ interface FakeSession {
   id: string;
   bundle?: Record<string, unknown>;
   bugs: FakeBug[];
-  index?: { start?: number; end?: number };
+  index?: Record<string, unknown>;
   meta?: Record<string, unknown>;
 }
 
@@ -192,21 +195,177 @@ describe("locateIncident — outcome", () => {
     expect(result.outcome).toBe("inconclusive");
     expect(result.candidates).toEqual([]);
   });
+
+  it("keeps similarly-scored candidates ambiguous and never adapts either session's evidence", async () => {
+    const store = fakeStore([
+      { id: "session-one", bugs: [bug({ bugId: "bug-one" })] },
+      { id: "session-two", bugs: [bug({ bugId: "bug-two" })] },
+    ]);
+
+    const result = locateIncident(strongSymptom, store, { now: 1_000 });
+    expect(result.outcome).toBe("ambiguous");
+    expect(result.candidates[0].confidence).toBeGreaterThanOrEqual(
+      DEFAULT_MATCH_THRESHOLD,
+    );
+    expect(
+      result.candidates[0].confidence - result.candidates[1].confidence,
+    ).toBeLessThan(DEFAULT_MATCH_MARGIN);
+
+    const located = locateEvidence(strongSymptom, store, { now: 1_000 });
+    expect(located.evidence).toEqual([]);
+    expect(located.match.outcome).toBe("ambiguous");
+    expect("sessionId" in located.match).toBe(false);
+    expect(located.match.candidates).toEqual([
+      expect.objectContaining({ sessionId: "session-one", bugId: "bug-one" }),
+      expect.objectContaining({ sessionId: "session-two", bugId: "bug-two" }),
+    ]);
+
+    const assembled = await locateAndAssemble(strongSymptom, store, {
+      now: 1_000,
+      sources: [],
+    });
+    expect(assembled.bundle.evidence).toEqual([]);
+    expect(assembled.bundle.located).toMatchObject({
+      outcome: "ambiguous",
+      method: "fuzzy",
+      candidates: located.match.candidates,
+    });
+    expect(assembled.bundle.located?.sessionId).toBeUndefined();
+    expect(assembled.bundle.gaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "no recorded session matched this symptom",
+        }),
+        expect.objectContaining({
+          reason:
+            "multiple candidate sessions scored within the decision margin; none is conclusive",
+        }),
+      ]),
+    );
+  });
+
+  it("matches when the top candidate clears the decision margin", () => {
+    const store = fakeStore([
+      { id: "session-strong", bugs: [bug({ bugId: "bug-strong" })] },
+      {
+        id: "session-weak",
+        bugs: [
+          bug({
+            bugId: "bug-weak",
+            title: "checkout alert",
+            representative: {
+              detector: "other_error",
+              message: "checkout alert",
+              route: "/other",
+            },
+          }),
+        ],
+      },
+    ]);
+
+    const result = locateIncident(strongSymptom, store, { now: 1_000 });
+    expect(result.outcome).toBe("matched");
+    expect(result.candidates[0].sessionId).toBe("session-strong");
+    expect(
+      result.candidates[0].confidence - result.candidates[1].confidence,
+    ).toBeGreaterThanOrEqual(DEFAULT_MATCH_MARGIN);
+  });
+
+  it("keeps matched and inconclusive match and located envelopes byte compatible", async () => {
+    const matchedStore = fakeStore([
+      { id: "session-matched", bugs: [bug({ bugId: "bug-matched" })] },
+    ]);
+    const matchedRanked = locateIncident(strongSymptom, matchedStore, {
+      now: 1_000,
+    });
+    const expectedMatchedMatch = {
+      sessionId: "session-matched",
+      confidence: matchedRanked.candidates[0].confidence,
+      outcome: "matched" as const,
+      reasons: matchedRanked.candidates[0].reasons,
+    };
+    expect(
+      locateEvidence(strongSymptom, matchedStore, { now: 1_000 }).match,
+    ).toStrictEqual(expectedMatchedMatch);
+    const matchedAssembled = await locateAndAssemble(
+      strongSymptom,
+      matchedStore,
+      { now: 1_000, sources: [] },
+    );
+    expect(matchedAssembled.match).toStrictEqual(expectedMatchedMatch);
+    expect(matchedAssembled.bundle.located).toStrictEqual({
+      ...expectedMatchedMatch,
+      method: "fuzzy",
+    });
+
+    const inconclusiveSymptom = { title: "payment gateway" };
+    const inconclusiveStore = fakeStore([
+      {
+        id: "session-near-miss",
+        bugs: [
+          bug({
+            bugId: "bug-near-miss",
+            title: "Payment failed",
+            representative: {
+              detector: "console_error",
+              message: "payment failed gateway timeout",
+              route: "/checkout",
+            },
+          }),
+        ],
+      },
+    ]);
+    const inconclusiveRanked = locateIncident(
+      inconclusiveSymptom,
+      inconclusiveStore,
+      { now: 1_000 },
+    );
+    const expectedInconclusiveMatch = {
+      confidence: inconclusiveRanked.candidates[0].confidence,
+      outcome: "inconclusive" as const,
+      reasons: inconclusiveRanked.candidates[0].reasons,
+    };
+    expect(
+      locateEvidence(inconclusiveSymptom, inconclusiveStore, {
+        now: 1_000,
+      }).match,
+    ).toStrictEqual(expectedInconclusiveMatch);
+    const inconclusiveAssembled = await locateAndAssemble(
+      inconclusiveSymptom,
+      inconclusiveStore,
+      { now: 1_000, sources: [] },
+    );
+    expect(inconclusiveAssembled.match).toStrictEqual(
+      expectedInconclusiveMatch,
+    );
+    expect(inconclusiveAssembled.bundle.located).toStrictEqual({
+      ...expectedInconclusiveMatch,
+      method: "fuzzy",
+    });
+  });
 });
 
 describe("locateIncident — deterministic ranking", () => {
-  it("breaks confidence ties by sessionId then bugId, independent of store order", () => {
-    // Identical bugs, no timestamps, no release → identical confidence.
-    const twin = bug({ bugId: "bug-twin" });
-    // Seed in reverse id order to prove ordering is not incidental.
+  it("breaks equal-confidence ties by recency before bugId, independent of store order", () => {
+    const now = 1_000;
+    // Both sessions get the same capped time boost. The more-recent one has a
+    // later index timestamp but a bugId that would lose an alphabetical tie.
     const store = fakeStore([
-      { id: "sess-b", bugs: [{ ...twin }] },
-      { id: "sess-a", bugs: [{ ...twin }] },
+      {
+        id: "sess-older",
+        bugs: [bug({ bugId: "bug-a" })],
+        index: { end: now },
+      },
+      {
+        id: "sess-newer",
+        bugs: [bug({ bugId: "bug-z" })],
+        index: { end: now + 1 },
+      },
     ]);
-    const result = locateIncident(strongSymptom, store, { now: 1_000 });
+    const result = locateIncident(strongSymptom, store, { now });
     expect(result.candidates.map((c) => c.sessionId)).toEqual([
-      "sess-a",
-      "sess-b",
+      "sess-newer",
+      "sess-older",
     ]);
     // Confidences are exactly equal (tie really is a tie).
     expect(result.candidates[0].confidence).toBe(
@@ -234,6 +393,109 @@ describe("locateIncident — deterministic ranking", () => {
         threshold: s + 1e-9,
       }).outcome,
     ).toBe("inconclusive");
+  });
+});
+
+describe("locateIncident — account narrowing", () => {
+  it("drops a higher scoring known foreign account before ranking while retaining unknown accounts", () => {
+    const store = fakeStore([
+      {
+        id: "session-foreign",
+        bugs: [bug({ bugId: "bug-foreign" })],
+        meta: { identity: { accountId: "account-foreign" } },
+      },
+      {
+        id: "session-target",
+        bugs: [
+          bug({
+            bugId: "bug-target",
+            title: "checkout failed",
+            representative: {
+              detector: "console_error",
+              message: "checkout failed",
+              route: "/checkout",
+            },
+          }),
+        ],
+        index: { account_id: "account-target" },
+      },
+      {
+        id: "session-unknown",
+        bugs: [
+          bug({
+            bugId: "bug-unknown",
+            title: "checkout",
+            representative: {
+              detector: "other_error",
+              message: "checkout",
+              route: "/other",
+            },
+          }),
+        ],
+      },
+    ]);
+
+    const unfiltered = locateIncident(strongSymptom, store, { now: 1_000 });
+    const targetWithoutNarrowing = unfiltered.candidates.find(
+      (candidate) => candidate.sessionId === "session-target",
+    );
+    expect(unfiltered.candidates[0].sessionId).toBe("session-foreign");
+    expect(unfiltered.candidates[0].confidence).toBeGreaterThan(
+      targetWithoutNarrowing!.confidence,
+    );
+
+    const result = locateIncident(strongSymptom, store, {
+      now: 1_000,
+      accountId: "account-target",
+    });
+
+    expect(result.outcome).toBe("matched");
+    expect(result.candidates.map((candidate) => candidate.sessionId)).toEqual([
+      "session-target",
+      "session-unknown",
+    ]);
+    expect(result.candidates[0].sessionId).toBe("session-target");
+  });
+});
+
+describe("locateIncident — calibration logging", () => {
+  it("logs the numeric top score and achieved margin for matched and ambiguous results", () => {
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    try {
+      const matched = locateIncident(
+        strongSymptom,
+        fakeStore([{ id: "session-only", bugs: [bug({ bugId: "bug-only" })] }]),
+        { now: 1_000 },
+      );
+      const ambiguous = locateIncident(
+        strongSymptom,
+        fakeStore([
+          { id: "session-one", bugs: [bug({ bugId: "bug-one" })] },
+          { id: "session-two", bugs: [bug({ bugId: "bug-two" })] },
+        ]),
+        { now: 1_000 },
+      );
+      const lines = stderr.mock.calls.map(([chunk]) =>
+        JSON.parse(String(chunk)) as Record<string, unknown>,
+      );
+
+      expect(lines[0]).toMatchObject({
+        outcome: "matched",
+        score: matched.candidates[0].confidence,
+        margin: matched.candidates[0].confidence,
+      });
+      expect(lines[1]).toMatchObject({
+        outcome: "ambiguous",
+        score: ambiguous.candidates[0].confidence,
+        margin:
+          ambiguous.candidates[0].confidence -
+          ambiguous.candidates[1].confidence,
+      });
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 
@@ -312,13 +574,15 @@ describe("locateIncident — logging", () => {
       .spyOn(process.stdout, "write")
       .mockImplementation(() => true);
     try {
-      locateIncident(strongSymptom, store, { now: 1_000 });
+      const result = locateIncident(strongSymptom, store, { now: 1_000 });
       expect(stderrSpy).toHaveBeenCalledTimes(1);
       expect(stdoutSpy).not.toHaveBeenCalled();
       const line = String(stderrSpy.mock.calls[0][0]);
       const parsed = JSON.parse(line);
       expect(parsed.event).toBe("locate-incident");
       expect(parsed.outcome).toBe("matched");
+      expect(parsed.score).toBe(result.candidates[0].confidence);
+      expect(parsed.margin).toBe(result.candidates[0].confidence);
       expect(Array.isArray(parsed.candidates)).toBe(true);
     } finally {
       stderrSpy.mockRestore();

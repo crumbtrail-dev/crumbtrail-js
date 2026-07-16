@@ -77,11 +77,22 @@ const RELEASE_HINT_WEIGHT = 0.1;
  */
 export const DEFAULT_MATCH_THRESHOLD = 0.5;
 
+/**
+ * Minimum score lead over the runner-up required to treat a located session as
+ * conclusive. A candidate that clears the confidence threshold without this
+ * lead remains ambiguous so its evidence is never attributed to one session.
+ */
+export const DEFAULT_MATCH_MARGIN = 0.15;
+
 export interface LocateIncidentOptions {
   /** Reference "now" for the time-proximity signal. Defaults to Date.now(). */
   now?: number;
   /** Override the match confidence bar. Defaults to {@link DEFAULT_MATCH_THRESHOLD}. */
   threshold?: number;
+  /** Override the required lead over the runner-up. Defaults to {@link DEFAULT_MATCH_MARGIN}. */
+  margin?: number;
+  /** Narrow candidates to this account when a candidate's account is known. */
+  accountId?: string;
 }
 
 /** One ranked recorded session/bug scored against the ticket symptom. Carries
@@ -94,11 +105,13 @@ export interface RankedCandidate {
   /** Combined confidence in [0,1]. */
   confidence: number;
   reasons: string[];
+  /** Most recent known activity time, used as the secondary rank. */
+  sessionTime?: number;
   bug: DistinctBug;
 }
 
 export interface LocateIncidentResult {
-  outcome: "matched" | "inconclusive";
+  outcome: "matched" | "ambiguous" | "inconclusive";
   candidates: RankedCandidate[];
 }
 
@@ -175,6 +188,28 @@ function candidateRelease(dir: string, store: RecallStore): string | undefined {
   return firstString(meta, ["release", "releaseId", "version"]);
 }
 
+/**
+ * Account recorded for a candidate session, when available. The account may
+ * have been written before or after the session index, so inspect both session
+ * records. Absence is intentionally preserved as unknown rather than treated
+ * as a mismatch by account narrowing.
+ */
+function candidateAccountId(
+  dir: string,
+  store: RecallStore,
+): string | undefined {
+  for (const name of ["meta.json", "index.json"]) {
+    const record = store.readJsonRecord(dir, name);
+    if (!record) continue;
+    const direct = firstString(record, ["accountId", "account_id"]);
+    if (direct) return direct;
+    const identity = isRecord(record.identity) ? record.identity : undefined;
+    const nested = identity ? stringField(identity.accountId) : undefined;
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
 /** Bounded time-proximity boost: exponential decay by session age vs the
  *  reference time. Returns { boost, recent } where `recent` (age within one
  *  half-life) drives whether a reason is attached — the boost itself is smooth. */
@@ -207,6 +242,7 @@ export function locateIncident(
 ): LocateIncidentResult {
   const now = opts.now ?? Date.now();
   const threshold = opts.threshold ?? DEFAULT_MATCH_THRESHOLD;
+  const margin = opts.margin ?? DEFAULT_MATCH_MARGIN;
   const query = symptomProfile(symptom);
   const symptomRelease = symptom.release?.trim();
 
@@ -216,6 +252,14 @@ export function locateIncident(
       store.readJsonRecord(dir, "llm.json") ??
       store.readJsonRecord(dir, "bundle.json") ??
       {};
+    const candidateAccount = candidateAccountId(dir, store);
+    if (
+      opts.accountId !== undefined &&
+      candidateAccount !== undefined &&
+      candidateAccount !== opts.accountId
+    ) {
+      continue;
+    }
     const sessionTime = candidateSessionTime(dir, store, bundle);
     const release = candidateRelease(dir, store);
     for (const raw of store.readDistinctBugs(dir)) {
@@ -245,25 +289,36 @@ export function locateIncident(
         bugId: bug.bugId,
         confidence: clamp01(base.score + time.boost + releaseBoost),
         reasons,
+        sessionTime,
         bug,
       });
     }
   }
 
-  // Deterministic total order: confidence desc, then sessionId asc, then bugId
-  // asc. (sessionId, bugId) is unique per candidate, so ties never resolve on
-  // incidental listSessions()/readDistinctBugs() order.
-  candidates.sort(
-    (a, b) =>
-      b.confidence - a.confidence ||
-      a.sessionId.localeCompare(b.sessionId) ||
-      a.bugId.localeCompare(b.bugId),
-  );
+  // Deterministic total order: confidence desc, then a more-recent session
+  // first (unknown times last), then bugId asc. sessionId resolves the only
+  // remaining impossible-to-rank duplicate so list/read order never leaks in.
+  candidates.sort((a, b) => {
+    const confidenceOrder = b.confidence - a.confidence;
+    if (confidenceOrder !== 0) return confidenceOrder;
+    if (a.sessionTime !== b.sessionTime) {
+      if (a.sessionTime === undefined) return 1;
+      if (b.sessionTime === undefined) return -1;
+      return b.sessionTime - a.sessionTime;
+    }
+    return (
+      a.bugId.localeCompare(b.bugId) || a.sessionId.localeCompare(b.sessionId)
+    );
+  });
 
+  const top1 = candidates[0]?.confidence;
+  const top2 = candidates[1]?.confidence ?? 0;
   const outcome: LocateIncidentResult["outcome"] =
-    candidates.length > 0 && candidates[0].confidence >= threshold
-      ? "matched"
-      : "inconclusive";
+    top1 === undefined || top1 < threshold
+      ? "inconclusive"
+      : top1 - top2 >= margin
+        ? "matched"
+        : "ambiguous";
 
   logLocate(outcome, candidates);
   return { outcome, candidates };
@@ -275,9 +330,15 @@ function logLocate(
   outcome: LocateIncidentResult["outcome"],
   candidates: RankedCandidate[],
 ): void {
+  const top1 = candidates[0]?.confidence ?? 0;
+  const top2 = candidates[1]?.confidence ?? 0;
+  const accepted = outcome === "matched" || outcome === "ambiguous";
   const line = {
     event: "locate-incident",
     outcome,
+    // Keep the top score and its achieved lead explicit for calibration. A
+    // single candidate has a runner up score of zero, so its margin is top1.
+    ...(accepted ? { score: top1, margin: top1 - top2 } : {}),
     candidates: candidates.map((c) => ({
       sessionId: c.sessionId,
       bugId: c.bugId,
@@ -359,6 +420,13 @@ export interface LocateMatch {
   confidence: number;
   outcome: LocateIncidentResult["outcome"];
   reasons: string[];
+  /** Compact ranked candidates for an ambiguous decision, never full bug data. */
+  candidates?: Array<{
+    sessionId: string;
+    bugId: string;
+    confidence: number;
+    reasons: string[];
+  }>;
 }
 
 /** Gap emitted for an inconclusive locate, mirroring toolSolveContext's
@@ -370,13 +438,34 @@ export const NO_LOCATED_SESSION_GAP: EvidenceGap = {
   suggestion: "provide baselineSession + currentSession, or widen capture",
 };
 
+/** Gap emitted alongside the standard no-session gap when several candidates
+ * are too close to attribute evidence honestly to one session. */
+export const AMBIGUOUS_LOCATED_SESSION_GAP: EvidenceGap = {
+  lane: "network",
+  reason:
+    "multiple candidate sessions scored within the decision margin; none is conclusive",
+  suggestion: "review the candidate sessions before acting",
+};
+
+function projectCandidates(
+  candidates: RankedCandidate[],
+): NonNullable<LocateMatch["candidates"]> {
+  return candidates.slice(0, 3).map((candidate) => ({
+    sessionId: candidate.sessionId,
+    bugId: candidate.bugId,
+    confidence: candidate.confidence,
+    reasons: candidate.reasons,
+  }));
+}
+
 /**
  * Locate the incident for a symptom and adapt the top matched candidate into
  * neutral evidence. On a match, evidence is the located session's evidence and
  * match.sessionId is set; on an inconclusive locate, evidence is [] and
- * match.sessionId is absent (the best near-miss's confidence/reasons are still
- * reported). This is the exact locate → evidence slice toolSolveContext used
- * inline; it is factored here so the inner endpoint shares it.
+ * match.sessionId is absent. Only ambiguous outcomes retain a compact near-miss
+ * list; inconclusive envelopes keep their established shape. Neither adapts
+ * session evidence. This is the exact locate → evidence slice toolSolveContext
+ * used inline; it is factored here so the inner endpoint shares it.
  */
 export function locateEvidence(
   symptom: Symptom,
@@ -393,6 +482,17 @@ export function locateEvidence(
         confidence: top.confidence,
         outcome: "matched",
         reasons: top.reasons,
+      },
+    };
+  }
+  if (located.outcome === "ambiguous") {
+    return {
+      evidence: [],
+      match: {
+        confidence: top?.confidence ?? 0,
+        outcome: "ambiguous",
+        reasons: top?.reasons ?? [],
+        candidates: projectCandidates(located.candidates),
       },
     };
   }
@@ -601,9 +701,17 @@ export async function locateAndAssemble(
   // A no-session locate ALWAYS states that no Crumbtrail session matched —
   // whether the bundle ends up empty (today's inconclusive) or populated purely
   // from adapter evidence (Mode A). A matched locate carries only adapter gaps.
+  // An ambiguous decision names its ambiguity separately so consumers can route
+  // the candidates to review rather than treat it as a normal no-match.
   const gaps =
     located.evidence.length === 0
-      ? [NO_LOCATED_SESSION_GAP, ...adapter.gaps]
+      ? [
+          NO_LOCATED_SESSION_GAP,
+          ...(located.match.outcome === "ambiguous"
+            ? [AMBIGUOUS_LOCATED_SESSION_GAP]
+            : []),
+          ...adapter.gaps,
+        ]
       : [...adapter.gaps];
   // Thread the locate decision onto the bundle (RankedBundle.located) so the
   // persisted bundle carries it uniformly with the MCP tool's output; the
@@ -615,6 +723,9 @@ export async function locateAndAssemble(
     method: "fuzzy",
     ...(located.match.sessionId ? { sessionId: located.match.sessionId } : {}),
     reasons: located.match.reasons,
+    ...(located.match.outcome === "ambiguous" && located.match.candidates
+      ? { candidates: located.match.candidates }
+      : {}),
   };
   const bundle = assembleBundle({
     symptom,

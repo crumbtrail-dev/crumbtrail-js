@@ -3,6 +3,7 @@ import { buildAdvisoryComment } from "../ticket/comment";
 
 const BUNDLE_URL =
   "https://app.crumbtrail.dev/api/bundles/bnd_deadbeef01234567";
+const SESSION_URL_BASE = "https://app.crumbtrail.dev/sessions";
 
 function text(comment: { paragraphs: readonly string[] }): string {
   return comment.paragraphs.join("\n");
@@ -132,6 +133,60 @@ describe("buildAdvisoryComment", () => {
     const rendered = text(doc);
     expect(rendered).toContain("could not locate");
     expect(rendered).toContain(BUNDLE_URL);
+  });
+
+  it("renders an ambiguous comment with candidates and no claim about one session", () => {
+    const doc = buildAdvisoryComment({
+      match: {
+        outcome: "ambiguous",
+        confidence: 0.81,
+        candidates: [
+          { sessionId: "sessionAlpha", confidence: 0.81 },
+          { sessionId: "sessionBeta", confidence: 0.74 },
+        ],
+      },
+      bundleUrl: BUNDLE_URL,
+      sessionUrlBase: SESSION_URL_BASE,
+      gaps: [
+        {
+          lane: "network",
+          reason: "multiple candidate sessions are close",
+          suggestion: "review the recorded evidence",
+        },
+      ],
+    });
+
+    const rendered = text(doc);
+    expect(rendered).toContain(
+      "Crumbtrail found 2 candidate sessions for this ticket but none is conclusive.",
+    );
+    expect(rendered).toContain(
+      "Candidate session: https://app.crumbtrail.dev/sessions/sessionAlpha (confidence 81%)",
+    );
+    expect(rendered).toContain(
+      "Candidate session: https://app.crumbtrail.dev/sessions/sessionBeta (confidence 74%)",
+    );
+    expect(rendered).toContain("What is missing:");
+    expect(rendered).toContain("Review the candidates before acting.");
+    expect(rendered).toContain(BUNDLE_URL);
+    expect(rendered.toLowerCase()).not.toContain("matched");
+    expect(rendered.toLowerCase()).not.toContain("verdict");
+    expect(rendered).not.toContain("-");
+  });
+
+  it("falls back to a candidate session id when no session URL base is available", () => {
+    const doc = buildAdvisoryComment({
+      match: {
+        outcome: "ambiguous",
+        confidence: 0.81,
+        candidates: [{ sessionId: "sessionAlpha", confidence: 0.81 }],
+      },
+      bundleUrl: BUNDLE_URL,
+    });
+
+    expect(text(doc)).toContain(
+      "Candidate session: sessionAlpha (confidence 81%)",
+    );
   });
 
   it("never equality-compares the confidence float (only a rounded display %)", () => {
