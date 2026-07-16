@@ -17,6 +17,12 @@ export type {
 } from "./distinct-bugs";
 export { FilesystemSessionStore, defaultSessionStore } from "./session-store";
 export type { SessionStore } from "./session-store";
+export {
+  FilesystemMcpReadStore,
+  RemoteMcpReadStore,
+  selectMcpReadStore,
+} from "./mcp-read-store";
+export type { McpReadStore } from "./mcp-read-store";
 export { SessionManager } from "./session";
 export type { SessionFinalizationResult, SessionListItem } from "./session";
 export {

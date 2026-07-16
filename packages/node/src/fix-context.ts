@@ -166,6 +166,20 @@ export function buildFixContext(
   const bundle = readBundle(sessionDir);
   const ranked = readCandidates(sessionDir);
 
+  return buildFixContextFromArtifacts(sessionDir, index, bundle, ranked);
+}
+
+/**
+ * Assembles the fix-context contract from already-read finalized artifacts.
+ * This lets alternate read backends preserve the stable local contract without
+ * duplicating the projection and ranking logic.
+ */
+export function buildFixContextFromArtifacts(
+  sessionDir: string,
+  index: Record<string, unknown>,
+  bundle: LlmBundle | undefined,
+  ranked: EvidenceCandidate[],
+): FixContext {
   const session = buildSession(sessionDir, index, bundle);
   const primaryWindow = buildPrimaryWindow(ranked, bundle);
   const reproHint = buildReproHint(ranked);
