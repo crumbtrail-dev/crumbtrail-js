@@ -5,6 +5,7 @@ import * as zlib from "node:zlib";
 import { BugQueueManager } from "./bug-queue";
 import {
   buildFixContext,
+  buildFixContextFromArtifacts,
   FixContextError,
   type FixContext,
 } from "./fix-context";
@@ -41,6 +42,9 @@ import {
   type DistinctBugRecurrenceInput,
 } from "./distinct-bugs";
 import { defaultSessionStore } from "./session-store";
+import { selectMcpReadStore, type McpReadStore } from "./mcp-read-store";
+import type { EvidenceCandidate } from "./evidence-index";
+import type { LlmBundle } from "./llm-bundle";
 import {
   buildRecallStore,
   isDistinctBugRecord as isDistinctBugRecordShared,
@@ -86,6 +90,8 @@ interface JsonRpcResponse {
 
 export interface McpServerConfig {
   outputDir: string;
+  /** Test seam for the session-artifact read backend used by MCP read tools. */
+  readStore?: McpReadStore;
   /**
    * Test-only seam: overrides how the git-host client is constructed for
    * `solveContext`'s intent-inference path. Production code leaves this
@@ -125,7 +131,7 @@ const MAX_TOKENS_SCHEMA = {
   type: "integer" as const,
   minimum: 1,
   description:
-    "Optional response token budget. Estimated as ceil(chars/4) of the serialized JSON — a cheap heuristic that UNDER-counts token-dense content (non-ASCII, base64, dense punctuation), so budget conservatively. When set, lower-ranked items are dropped whole (from the bottom of the ranking, never rewritten) to fit, and the response gains tokenEstimate plus a dropReport listing what was omitted. Omit it for the full, unbudgeted payload.",
+    "Optional response token budget. Estimated as ceil(chars/4) of the serialized JSON. This low cost heuristic can undercount dense content such as non ASCII text, base64, or punctuation, so budget conservatively. When set, lower ranked items are dropped whole from the bottom of the ranking and never rewritten. The response gains tokenEstimate and a dropReport listing what was omitted. Omit it for the full payload.",
 };
 
 const TOOLS = [
@@ -133,7 +139,7 @@ const TOOLS = [
   {
     name: "listSessions",
     description:
-      "List recorded Crumbtrail sessions — complete app evidence sessions (clicks when present, console, network, backend spans, database row changes, environment and feature flags) ready to hand to an agent. Use this first to find the sessionId for getFixContext (bug context for one session) or getRegressionContext (cross-release regression witness). Supports app/time/release/build filters.",
+      "List recorded Crumbtrail sessions. These are complete app evidence sessions with clicks when present, console, network, backend spans, database row changes, environment, and feature flags. Use this first to find the sessionId for getFixContext, which covers one session, or getRegressionContext, which provides a cross release regression witness. Supports app, time, release, and build filters.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -487,7 +493,7 @@ const TOOLS = [
   {
     name: "getWindow",
     description:
-      "Get the cold events within the absolute-ms time window [t0,t1] (the same units as manifest.session.startMs/endMs and a candidate.evidenceWindow.start/end). This is the only tool that reads the cold event stream; it is bounded to the window and capped (default/max 500 events) and reports truncation. Use it after locating a candidate window via getSessionManifest/getEvidence.",
+      "Get cold events within the absolute millisecond time window [t0,t1], using the same units as manifest.session.startMs/endMs and candidate.evidenceWindow.start/end. This is the only tool that reads the cold event stream. It is limited to the window, capped at 500 events by default and at most, and reports truncation. Use it after locating a candidate window with getSessionManifest or getEvidence.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -501,7 +507,7 @@ const TOOLS = [
         maxTokens: {
           ...MAX_TOKENS_SCHEMA,
           description:
-            "Optional response token budget, estimated as ceil(chars/4) of the serialized JSON — a cheap heuristic that UNDER-counts token-dense content, so budget conservatively. When set, chronological events are dropped from the TAIL of the window (after the limit cap) to fit; the response gains tokenEstimate plus a dropReport whose first ref carries the first omitted event timestamp (t=<ms>) so you can re-window from there. Omit it for the full, unbudgeted payload.",
+            "Optional response token budget, estimated as ceil(chars/4) of the serialized JSON. This low cost heuristic can undercount dense content, so budget conservatively. When set, chronological events are dropped from the end of the window after the limit cap to fit. The response gains tokenEstimate and a dropReport whose first ref carries the first omitted event timestamp (t=<ms>) so you can start a new window there. Omit it for the full payload.",
         },
       },
       required: ["sessionId", "t0", "t1"],
@@ -511,7 +517,7 @@ const TOOLS = [
   {
     name: "getEvidence",
     description:
-      "Resolve a single piece of evidence by ref from hot-plane artifacts only. ref is a candidate id (e.g. cand_0001 -> candidate + its evidence window), an interactive-element signature (sig -> signatures.json entry + occurrence count), or a request/event id (resolved to the candidate whose anchor references it). Returns a small payload; use getWindow for the raw chronological events. Every response carries tokenEstimate (ceil(chars/4) heuristic).",
+      "Resolve one piece of evidence by ref from hot plane artifacts only. ref is a candidate id, such as cand_0001, an interactive element signature, or a request or event id. Candidate and request ids resolve to the candidate whose anchor references them. Returns a small payload. Use getWindow for raw chronological events. Every response carries tokenEstimate using a ceil(chars/4) heuristic.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -519,7 +525,7 @@ const TOOLS = [
         ref: {
           type: "string",
           description:
-            "A candidate id, an interactive-element signature, or a request/event id",
+            "A candidate id, an interactive element signature, or a request or event id",
         },
       },
       required: ["sessionId", "ref"],
@@ -768,6 +774,7 @@ function removeUndefined<T extends Record<string, unknown>>(value: T): T {
 
 export class McpServer {
   private outputDir: string;
+  private store: McpReadStore;
   private bugQueue: BugQueueManager;
   private gitHostClientFactory?: McpServerConfig["gitHostClientFactory"];
   private ticketConnectorFactory?: McpServerConfig["ticketConnectorFactory"];
@@ -776,6 +783,7 @@ export class McpServer {
 
   constructor(config: McpServerConfig) {
     this.outputDir = config.outputDir;
+    this.store = config.readStore ?? selectMcpReadStore(this.outputDir);
     fs.mkdirSync(this.outputDir, { recursive: true });
     const bugsDir = path.join(path.dirname(this.outputDir), "bugs");
     this.bugQueue = new BugQueueManager({ bugsDir });
@@ -955,12 +963,29 @@ export class McpServer {
     return defaultSessionStore.resolveSessionDir(sessionId, this.outputDir);
   }
 
+  private async sessionDirAsync(sessionId: string): Promise<string> {
+    if (!this.isSafeSessionId(sessionId))
+      return path.join(this.outputDir, "__invalid_session_id__");
+    return this.store.resolveSessionDir(sessionId);
+  }
+
   private isSafeSessionId(sessionId: unknown): sessionId is string {
     return typeof sessionId === "string" && /^[A-Za-z0-9._-]+$/.test(sessionId);
   }
 
   private readEvents(sessionDir: string): BugEvent[] {
     const buf = defaultSessionStore.readArtifact(sessionDir, "events.ndjson");
+    if (!buf) return [];
+    const content = buf.toString("utf-8").trim();
+    if (!content) return [];
+    return content
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
+
+  private async readEventsAsync(sessionDir: string): Promise<BugEvent[]> {
+    const buf = await this.store.readArtifact(sessionDir, "events.ndjson");
     if (!buf) return [];
     const content = buf.toString("utf-8").trim();
     if (!content) return [];
@@ -1023,16 +1048,25 @@ export class McpServer {
     return textResult(data.failedReqs || []);
   }
 
-  private toolListSessions(args: Record<string, unknown>) {
+  private async toolListSessions(args: Record<string, unknown>) {
     const sessions: Record<string, unknown>[] = [];
-    for (const { dir } of defaultSessionStore.listSessions(this.outputDir)) {
-      const metaBuf = defaultSessionStore.readArtifact(dir, "meta.json");
-      if (!metaBuf) continue;
+    for (const { dir } of await this.store.listSessions()) {
+      const meta = await this.readJsonRecordAsync(dir, "meta.json");
+      if (!meta) continue;
       try {
-        const meta = JSON.parse(metaBuf.toString("utf-8"));
         if (args.app && meta.app !== args.app) continue;
-        if (typeof args.after === "number" && meta.start < args.after) continue;
-        if (typeof args.before === "number" && meta.start > args.before)
+        const start = numberField(meta.start);
+        if (
+          typeof args.after === "number" &&
+          start !== undefined &&
+          start < args.after
+        )
+          continue;
+        if (
+          typeof args.before === "number" &&
+          start !== undefined &&
+          start > args.before
+        )
           continue;
         if (
           typeof args.release === "string" &&
@@ -1089,18 +1123,25 @@ export class McpServer {
     return keys.some((key) => meta[key] === expected);
   }
 
-  private toolGetIndex(args: Record<string, unknown>) {
-    const dir = this.sessionDir(args.sessionId as string);
-    const buf = defaultSessionStore.readArtifact(dir, "index.json");
-    if (!buf) return errorResult("Session not found");
-    const data = JSON.parse(buf.toString("utf-8"));
-    return textResult(data);
+  private async toolGetIndex(args: Record<string, unknown>) {
+    const dir = await this.sessionDirAsync(args.sessionId as string);
+    const index = await this.readJsonRecordAsync(dir, "index.json");
+    if (!index) return errorResult("Session not found");
+    return textResult(index);
   }
 
-  private toolGetEvents(args: Record<string, unknown>) {
-    const target = this.resolveTarget(args);
-    if ("error" in target) return errorResult(target.error);
-    let events = this.filterEvents(this.readEvents(target.dir), args);
+  private async toolGetEvents(args: Record<string, unknown>) {
+    let events: BugEvent[];
+    if (args.bugId !== undefined) {
+      const target = this.resolveTarget(args);
+      if ("error" in target) return errorResult(target.error);
+      events = this.readEvents(target.dir);
+    } else {
+      events = await this.readEventsAsync(
+        await this.sessionDirAsync(args.sessionId as string),
+      );
+    }
+    events = this.filterEvents(events, args);
     const limit = typeof args.limit === "number" ? args.limit : 100;
     events = events.slice(0, limit);
     return textResult(events);
@@ -1442,14 +1483,30 @@ export class McpServer {
     );
   }
 
-  private toolGetFixContext(args: Record<string, unknown>) {
+  private async toolGetFixContext(args: Record<string, unknown>) {
     const budget = this.maxTokensOf(args);
     if ("error" in budget) return errorResult(budget.error);
     const sessionId = args.sessionId as string;
+    const dir = await this.sessionDirAsync(sessionId);
     try {
-      const context = buildFixContext(this.sessionDir(sessionId), {
-        outputDir: this.outputDir,
-      });
+      if (!(await this.store.statArtifact(dir, "index.json"))) {
+        throw new FixContextError(
+          "session-not-found",
+          `No finalized session found at ${dir} (missing index.json). Run post-processing first.`,
+        );
+      }
+      const index = (await this.readJsonRecordAsync(dir, "index.json")) ?? {};
+      const bundle =
+        (await this.readJsonRecordAsync(dir, "llm.json")) ??
+        (await this.readJsonRecordAsync(dir, "bundle.json"));
+      const context = buildFixContextFromArtifacts(
+        dir,
+        index,
+        bundle as LlmBundle | undefined,
+        (await this.readCandidatesJsonlAsync(
+          dir,
+        )) as unknown as EvidenceCandidate[],
+      );
       return this.fixContextResult(context, budget.maxTokens);
     } catch (err) {
       if (err instanceof FixContextError) return errorResult(err.message);
@@ -1457,17 +1514,17 @@ export class McpServer {
     }
   }
 
-  private toolGetOpinion(args: Record<string, unknown>) {
+  private async toolGetOpinion(args: Record<string, unknown>) {
     const sessionId = stringField(args.sessionId);
     if (!sessionId) return errorResult("getOpinion requires sessionId");
-    const dir = this.sessionDir(sessionId);
-    if (!this.sessionExists(dir)) return errorResult("Session not found");
-
-    const opinion = this.readJsonRecord(dir, "opinion.json");
+    const dir = await this.sessionDirAsync(sessionId);
+    const opinion = await this.readJsonRecordAsync(dir, "opinion.json");
     if (opinion) return textResult(opinion);
 
-    const legacy = this.readJsonRecord(dir, "diagnosis.json");
+    const legacy = await this.readJsonRecordAsync(dir, "diagnosis.json");
     if (legacy) return textResult(normalizeAiOpinion(legacy));
+    if (!(await this.sessionExistsAsync(dir)))
+      return errorResult("Session not found");
     return errorResult("No opinion generated yet for this session.");
   }
 
@@ -2029,27 +2086,29 @@ export class McpServer {
 
   // --- Hierarchical lazy retrieval (manifest -> window -> evidence) ---
 
-  private toolGetSessionManifest(args: Record<string, unknown>) {
-    const dir = this.sessionDir(args.sessionId as string);
-    const manifest = this.readJsonRecord(dir, "manifest.json");
+  private async toolGetSessionManifest(args: Record<string, unknown>) {
+    const dir = await this.sessionDirAsync(args.sessionId as string);
+    const manifest = await this.readJsonRecordAsync(dir, "manifest.json");
     // Always-present additive tokenEstimate (CP4): the manifest is the drilldown
     // entry point, so agents can plan follow-up budgets from it.
     if (manifest) return textResult(attachTokenEstimate(manifest));
 
-    const index = this.readJsonRecord(dir, "index.json");
+    const index = await this.readJsonRecordAsync(dir, "index.json");
     if (!index) return errorResult("Session not found");
-    return textResult(attachTokenEstimate(this.synthesizeManifest(dir, index)));
+    return textResult(
+      attachTokenEstimate(await this.synthesizeManifestAsync(dir, index)),
+    );
   }
 
-  private synthesizeManifest(
+  private async synthesizeManifestAsync(
     dir: string,
     index: Record<string, unknown>,
-  ): Record<string, unknown> {
+  ): Promise<Record<string, unknown>> {
     const start = numberField(index.start);
     const end = numberField(index.end);
     const errs = Array.isArray(index.errs) ? index.errs : [];
     const failedReqs = Array.isArray(index.failedReqs) ? index.failedReqs : [];
-    const candidates = this.readCandidatesJsonl(dir);
+    const candidates = await this.readCandidatesJsonlAsync(dir);
     return removeUndefined({
       schemaVersion: 1,
       kind: "crumbtrail.session-manifest",
@@ -2091,18 +2150,19 @@ export class McpServer {
     });
   }
 
-  private toolGetWindow(args: Record<string, unknown>) {
+  private async toolGetWindow(args: Record<string, unknown>) {
     const budget = this.maxTokensOf(args);
     if ("error" in budget) return errorResult(budget.error);
-    const dir = this.sessionDir(args.sessionId as string);
+    const dir = await this.sessionDirAsync(args.sessionId as string);
     const t0 = numberField(args.t0);
     const t1 = numberField(args.t1);
     if (t0 === undefined || t1 === undefined)
       return errorResult("getWindow requires numeric t0 and t1 (absolute ms)");
 
-    const events = this.readColdEvents(dir);
+    const events = await this.readColdEventsAsync(dir);
     if (events === undefined) {
-      if (!this.sessionExists(dir)) return errorResult("Session not found");
+      if (!(await this.sessionExistsAsync(dir)))
+        return errorResult("Session not found");
       const empty = {
         sessionId: args.sessionId,
         t0: Math.min(t0, t1),
@@ -2151,13 +2211,11 @@ export class McpServer {
     );
   }
 
-  private toolGetEvidence(args: Record<string, unknown>) {
+  private async toolGetEvidence(args: Record<string, unknown>) {
     const sessionId = args.sessionId as string;
     const ref = args.ref as string;
-    const dir = this.sessionDir(sessionId);
-    if (!this.sessionExists(dir)) return errorResult("Session not found");
-
-    const candidates = this.readCandidatesJsonl(dir);
+    const dir = await this.sessionDirAsync(sessionId);
+    const candidates = await this.readCandidatesJsonlAsync(dir);
 
     // Every getEvidence payload carries an always-present additive
     // tokenEstimate (CP4) so agents can account for drilldown costs.
@@ -2179,12 +2237,12 @@ export class McpServer {
       );
     }
 
-    const signatures = this.readSignatureEntries(dir);
+    const signatures = await this.readSignatureEntriesAsync(dir);
     const signature = signatures.find(
       (entry) => stringField(entry.sig) === ref || String(entry.id) === ref,
     );
     if (signature) {
-      const occurrence = this.readInteractiveElement(
+      const occurrence = await this.readInteractiveElementAsync(
         dir,
         stringField(signature.sig),
       );
@@ -2222,6 +2280,9 @@ export class McpServer {
       );
     }
 
+    if (!(await this.sessionExistsAsync(dir)))
+      return errorResult("Session not found");
+
     return textResult(
       attachTokenEstimate({
         sessionId,
@@ -2250,9 +2311,25 @@ export class McpServer {
     ].some((name) => defaultSessionStore.statArtifact(dir, name) !== undefined);
   }
 
+  private async sessionExistsAsync(dir: string): Promise<boolean> {
+    const artifacts = await Promise.all(
+      [
+        "manifest.json",
+        "index.json",
+        "meta.json",
+        "candidates.jsonl",
+        "events.ndjson",
+        "events.ndjson.zst",
+      ].map((name) => this.store.statArtifact(dir, name)),
+    );
+    return artifacts.some((artifact) => artifact !== undefined);
+  }
+
   /** Reads the sanitized cold event stream first; falls back to legacy/plain events when zstd is absent. */
-  private readColdEvents(dir: string): BugEvent[] | undefined {
-    const cold = defaultSessionStore.readArtifact(dir, "events.ndjson.zst");
+  private async readColdEventsAsync(
+    dir: string,
+  ): Promise<BugEvent[] | undefined> {
+    const cold = await this.store.readArtifact(dir, "events.ndjson.zst");
     if (cold) {
       if (typeof zlib.zstdDecompressSync !== "function") {
         throw new Error(
@@ -2261,7 +2338,7 @@ export class McpServer {
       }
       return this.parseEvents(zlib.zstdDecompressSync(cold).toString("utf-8"));
     }
-    const plain = defaultSessionStore.readArtifact(dir, "events.ndjson");
+    const plain = await this.store.readArtifact(dir, "events.ndjson");
     if (plain) return this.parseEvents(plain.toString("utf-8"));
     return undefined;
   }
@@ -2275,23 +2352,68 @@ export class McpServer {
       .map((line) => JSON.parse(line));
   }
 
-  private readCandidatesJsonl(dir: string): Record<string, unknown>[] {
-    const candidatesBuf = defaultSessionStore.readArtifact(
+  private async readCandidatesJsonlAsync(
+    dir: string,
+  ): Promise<Record<string, unknown>[]> {
+    const candidatesBuf = await this.store.readArtifact(
       dir,
       "candidates.jsonl",
     );
-    if (!candidatesBuf) return [];
-    const out: Record<string, unknown>[] = [];
-    for (const line of candidatesBuf.toString("utf-8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const parsed: unknown = JSON.parse(line);
-        if (isRecord(parsed)) out.push(parsed);
-      } catch {
-        // skip malformed lines
+    if (candidatesBuf) {
+      const out: Record<string, unknown>[] = [];
+      for (const line of candidatesBuf.toString("utf-8").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (isRecord(parsed)) out.push(parsed);
+        } catch {
+          // skip malformed lines
+        }
       }
+      return out;
     }
-    return out;
+
+    return [];
+  }
+
+  private async readSignatureEntriesAsync(
+    dir: string,
+  ): Promise<Record<string, unknown>[]> {
+    const signatures = await this.readJsonRecordAsync(dir, "signatures.json");
+    return Array.isArray(signatures?.entries)
+      ? signatures.entries.filter(isRecord)
+      : [];
+  }
+
+  private async readInteractiveElementAsync(
+    dir: string,
+    sig: string | undefined,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!sig) return undefined;
+    const match = (await this.readInteractiveElementsAsync(dir)).find(
+      (element) => stringField(element.sig) === sig,
+    );
+    if (!match) return undefined;
+    return removeUndefined({
+      count: numberField(match.count),
+      path: stringField(match.path),
+      tag: stringField(match.tag),
+      txt: stringField(match.txt),
+    });
+  }
+
+  private async readInteractiveElementsAsync(
+    dir: string,
+  ): Promise<Record<string, unknown>[]> {
+    const bundle =
+      (await this.readJsonRecordAsync(dir, "llm.json")) ??
+      (await this.readJsonRecordAsync(dir, "bundle.json"));
+    const browserEvidence = isRecord(bundle?.browserEvidence)
+      ? bundle.browserEvidence
+      : undefined;
+    return Array.isArray(browserEvidence?.interactiveElements)
+      ? browserEvidence.interactiveElements.filter(isRecord)
+      : [];
   }
 
   private readSignatureEntries(dir: string): Record<string, unknown>[] {
@@ -2516,6 +2638,20 @@ export class McpServer {
     name: string,
   ): Record<string, unknown> | undefined {
     return readSessionJsonRecord(dir, name);
+  }
+
+  private async readJsonRecordAsync(
+    dir: string,
+    name: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    try {
+      const buf = await this.store.readArtifact(dir, name);
+      if (!buf) return undefined;
+      const parsed: unknown = JSON.parse(buf.toString("utf-8"));
+      return isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private toolGetStorageSnapshot(args: Record<string, unknown>) {
