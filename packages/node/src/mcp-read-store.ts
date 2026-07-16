@@ -123,9 +123,15 @@ export class RemoteMcpReadStore implements McpReadStore {
         : undefined;
     }
 
-    // A compliant artifact endpoint supplies Content-Length. Keep this fallback
-    // bounded and timed for endpoints that omit it rather than trusting an
-    // unbounded response body.
+    // No Content-Length came back, so the endpoint answered with chunked
+    // framing and the size is only knowable by downloading the artifact. This
+    // fallback pays for a SECOND request and streams the whole body just to
+    // measure it, so it is a real cost, not a formality: it stays bounded and
+    // timed rather than trusting an unbounded response.
+    //
+    // Crumbtrail's own cloud declares the length and takes the cheap path
+    // above; it did not always, and the omission silently doubled every stat.
+    // This path is for endpoints that still omit the header.
     const bytes = await this.fetchBody(path, "byteLength");
     return bytes === undefined ? undefined : { bytes, isDir: false };
   }

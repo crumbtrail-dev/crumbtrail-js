@@ -28,6 +28,19 @@ type SessionResponseMode =
 
 type ArtifactResponseMode = "normal" | "stalled";
 
+/**
+ * How the mock frames an artifact response.
+ *
+ * This mirrors a real deployment rather than an idealized one. `chunked` is an
+ * endpoint that writes a body without declaring its size, which is what node
+ * emits by default and what the hosted cloud itself did until it was fixed to
+ * send Content-Length. `content-length` mirrors the fixed hosted cloud.
+ *
+ * The distinction is load bearing: a mock that sends a header production omits
+ * silently steers every stat onto the cheap path and hides the double fetch.
+ */
+type ArtifactFraming = "chunked" | "content-length";
+
 interface MockCloud {
   baseUrl: string;
   requests: MockRequest[];
@@ -37,6 +50,7 @@ interface MockCloud {
 interface MockCloudOptions {
   sessionResponse?: SessionResponseMode;
   artifactResponse?: ArtifactResponseMode;
+  artifactFraming?: ArtifactFraming;
 }
 
 const SESSION_ID = "sess_fixture";
@@ -103,6 +117,7 @@ const artifacts: Record<string, string> = {
 function startMockCloud({
   sessionResponse = "normal",
   artifactResponse = "normal",
+  artifactFraming = "chunked",
 }: MockCloudOptions = {}): Promise<MockCloud> {
   const requests: MockRequest[] = [];
   const sockets = new Set<Socket>();
@@ -187,9 +202,14 @@ function startMockCloud({
         res.write('{"id":');
         return;
       }
+      // Only declare a length when the framing under test says so. Node omits
+      // Content-Length and falls back to chunked transfer encoding otherwise,
+      // which is exactly what an endpoint that does not set the header does.
       res.writeHead(200, {
         "content-type": "application/json",
-        "content-length": Buffer.byteLength(artifact),
+        ...(artifactFraming === "content-length"
+          ? { "content-length": Buffer.byteLength(artifact) }
+          : {}),
       });
       res.end(artifact);
       return;
@@ -419,6 +439,84 @@ describe("MCP remote read store", () => {
     });
 
     await expect(callTool(server, "listSessions", {})).resolves.toEqual([]);
+  });
+
+  it("frames artifact responses the way the endpoint under test really does", async () => {
+    // Guards the mock against drifting back into sending a header production
+    // may not send. Every stat assertion below is only worth as much as this.
+    const artifactUrl = (baseUrl: string) =>
+      `${baseUrl}/api/agent/sessions/${SESSION_ID}/artifacts/index.json`;
+    const headers = { authorization: `Bearer ${TOKEN}` };
+
+    mock = await startMockCloud({ artifactFraming: "chunked" });
+    const chunked = await fetch(artifactUrl(mock.baseUrl), { headers });
+    expect(chunked.headers.get("content-length")).toBeNull();
+    expect(chunked.headers.get("transfer-encoding")).toBe("chunked");
+    await chunked.text();
+    await mock.stop();
+
+    mock = await startMockCloud({ artifactFraming: "content-length" });
+    const declared = await fetch(artifactUrl(mock.baseUrl), { headers });
+    expect(declared.headers.get("content-length")).toBe(
+      String(Buffer.byteLength(artifacts["index.json"])),
+    );
+    await declared.text();
+  });
+
+  it("stats an artifact with a single GET when the endpoint declares Content-Length", async () => {
+    // Mirrors the fixed hosted cloud. The stat takes the size off the header
+    // and cancels the body, so it costs one request and buffers no artifact.
+    mock = await startMockCloud({ artifactFraming: "content-length" });
+    const store = new RemoteMcpReadStore({
+      baseUrl: mock.baseUrl,
+      token: TOKEN,
+    });
+
+    mock.requests.length = 0;
+    await expect(
+      store.statArtifact(SESSION_ID, "index.json"),
+    ).resolves.toEqual({
+      bytes: Buffer.byteLength(artifacts["index.json"]),
+      isDir: false,
+    });
+
+    // Exactly one GET. A second request here means the cheap path stopped
+    // firing and every stat silently became a full artifact download again.
+    expect(
+      mock.requests.filter((request) =>
+        request.path.endsWith("/artifacts/index.json"),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        method: "GET",
+        path: `/api/agent/sessions/${SESSION_ID}/artifacts/index.json`,
+      }),
+    ]);
+  });
+
+  it("bounds the stat to one extra GET when the endpoint omits Content-Length", async () => {
+    // Mirrors an endpoint answering with chunked framing: the size is only
+    // knowable by downloading the body, so the stat costs a second GET — and
+    // must cost no more than that.
+    mock = await startMockCloud({ artifactFraming: "chunked" });
+    const store = new RemoteMcpReadStore({
+      baseUrl: mock.baseUrl,
+      token: TOKEN,
+    });
+
+    mock.requests.length = 0;
+    await expect(
+      store.statArtifact(SESSION_ID, "index.json"),
+    ).resolves.toEqual({
+      bytes: Buffer.byteLength(artifacts["index.json"]),
+      isDir: false,
+    });
+
+    const statRequests = mock.requests.filter((request) =>
+      request.path.endsWith("/artifacts/index.json"),
+    );
+    expect(statRequests.length).toBe(2);
+    expect(statRequests.every((request) => request.method === "GET")).toBe(true);
   });
 
   it("times out stalled artifact reads and the stat fallback", async () => {
