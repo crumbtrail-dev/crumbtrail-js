@@ -1,5 +1,7 @@
 import { buildDbDiffEvent } from "./diff-event";
 import {
+  emitGap,
+  emitDbEvent,
   emitDbDiffEvents,
   emitDbReadEvents,
   emitImagelessDbDiff,
@@ -10,7 +12,9 @@ import {
   type InstrumentDbClientOptions,
 } from "./instrument-shared";
 import {
+  classifyStatement,
   countPlaceholders,
+  leadingSqlKeyword,
   parseMutation,
   parseRead,
   type ParsedMutation,
@@ -164,7 +168,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
           `SELECT * FROM ${parsed.table} WHERE ${pkCols[0]} = ?`,
           [header.insertId],
         );
-      } catch {
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
         rows = [];
       }
       if (rows.length > 0) {
@@ -217,7 +222,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
         const pkSelect = buildPkSelect(parsed.table, cappedPks);
         try {
           postRows = await selectRows(pkSelect.text, pkSelect.params);
-        } catch {
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
           postRows = [];
         }
       }
@@ -251,7 +257,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
           if (postKeys.has(key)) continue;
           const before = beforeByPk.get(key);
           if (!before) continue;
-          options.emit(
+          emitDbEvent(
+            options,
             buildDbDiffEvent({
               engine: ENGINE,
               op: "update",
@@ -326,10 +333,22 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
       let parsedRead: ParsedRead | undefined;
       let requestId: string | undefined;
       try {
-        parsed = parseMutation(sql);
-        parsedRead = parsed ? undefined : parseRead(sql);
+        const classification = classifyStatement(sql);
+        if (classification.kind === "unparsable" && classification.mayMutate) {
+          emitGap(options, {
+            reason: "unparsed_sql",
+            detail: leadingSqlKeyword(sql),
+          });
+        }
+        parsed =
+          classification.kind === "mutation"
+            ? classification.mutation
+            : undefined;
+        parsedRead =
+          classification.kind === "read" ? classification.read : undefined;
         requestId = options.requestId ?? options.getRequestId?.();
-      } catch {
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
         return run(sql, values);
       }
       if (!requestId) return run(sql, values);
@@ -352,8 +371,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
               options,
               emittedReadRowsByRequest,
             });
-          } catch {
-            // Swallow: read capture must never change whether the host query succeeds.
+          } catch (error) {
+            emitGap(options, { reason: "capture_exception", error });
           }
         }
         return result;
@@ -364,8 +383,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
         const result = await run(sql, values);
         try {
           await captureInsert(parsed, result, requestId);
-        } catch {
-          // Swallow: capturing a diff must never change whether the host's query succeeds.
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
         }
         return result;
       }
@@ -384,7 +403,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
             `SELECT * FROM ${parsedMutation.table} ${parsedMutation.whereClause}`,
             whereParams,
           );
-        } catch {
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
           preRows = undefined;
         }
       }
@@ -396,8 +416,8 @@ export function instrumentMysqlClient<T extends DuckTypedMysqlClient>(
         } else {
           await captureDelete(parsedMutation, result, requestId, preRows);
         }
-      } catch {
-        // Swallow: capturing a diff must never change whether the host's query succeeds.
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
       }
       return result;
     };

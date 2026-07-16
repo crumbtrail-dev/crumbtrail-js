@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CAPTURE_GAP_EVENT_KIND,
   DB_DIFF_BULK_EVENT_KIND,
   DB_DIFF_EVENT_KIND,
   type BugEvent,
@@ -162,8 +163,11 @@ describe("instrumentSqliteDatabase — INSERT", () => {
       .run("a", "b");
 
     expect(info).toEqual({ changes: 1, lastInsertRowid: 5 });
-    expect(events).toHaveLength(1);
-    const d = diffData(events[0]);
+    expect(events[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(events[0].d).toMatchObject({ reason: "capture_exception" });
+    const diff = events.find((event) => event.k === DB_DIFF_EVENT_KIND);
+    expect(diff).toBeDefined();
+    const d = diffData(diff!);
     expect(d.pk).toBeNull();
     expect(d.rowCount).toBe(1);
     expect(d.engine).toBe("sqlite");
@@ -376,8 +380,11 @@ describe("instrumentSqliteDatabase — UPDATE", () => {
     expect(info).toEqual({ changes: 2, lastInsertRowid: 0 });
     expect(fake.calls.some((c) => c.method === "run")).toBe(true);
     // Capture degraded to an image-less diff carrying the row count.
-    expect(events).toHaveLength(1);
-    const d = diffData(events[0]);
+    expect(events[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(events[0].d).toMatchObject({ reason: "capture_exception" });
+    const diff = events.find((event) => event.k === DB_DIFF_EVENT_KIND);
+    expect(diff).toBeDefined();
+    const d = diffData(diff!);
     expect(d.pk).toBeNull();
     expect(d.rowCount).toBe(2);
     expect(d.engine).toBe("sqlite");

@@ -23,6 +23,12 @@ export {
   type DuckTypedPgQueryResult,
   type InstrumentPgClientOptions,
 } from "./pg";
+export {
+  classifyStatement,
+  leadingSqlKeyword,
+  looksLikePotentialWrite,
+} from "./sql";
+export type { StatementClassification } from "./sql";
 export type { InstrumentDbClientOptions } from "./instrument-shared";
 export {
   instrumentMysqlClient,

@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  CAPTURE_GAP_EVENT_KIND,
+  DB_DIFF_EVENT_KIND,
   redactTokenLikeString,
   redactValue,
   type BugEvent,
@@ -199,6 +201,19 @@ export interface LlmBundleRedactionSummary {
   reasons: Record<string, number>;
   actions: Partial<Record<RedactionAction, number>>;
   notes: string[];
+}
+
+/**
+ * Deterministic capture completeness summary. A session is `complete` with zero gaps. It is
+ * `degraded` when at least one gap exists but both a backend request event and a database diff
+ * still provide the core request to database join evidence. Every other nonzero gap state is
+ * `fragmentary`, because the differentiated path has little or no join evidence.
+ */
+export interface LlmBundleCompleteness {
+  gapCount: number;
+  gapsBySurface: Record<string, number>;
+  gapsByReason: Record<string, number>;
+  grade: "complete" | "degraded" | "fragmentary";
 }
 
 export interface LlmBundleFailedRequestSummary {
@@ -456,6 +471,8 @@ export interface LlmBundle {
     }>;
   };
   degradedCapabilities: LlmBundleDegradedCapability[];
+  /** Completeness contract derived only from the session's `capture_gap` events. */
+  completeness: LlmBundleCompleteness;
   redaction: LlmBundleRedactionSummary;
   limitations: string[];
   inspectionGuide: Array<{ step: number; path: string; purpose: string }>;
@@ -693,6 +710,7 @@ export function buildLlmBundle({
     describeArtifact(sessionDir, artifact),
   );
   const redaction = summarizeRedaction(events);
+  const completeness = buildCompleteness(events);
   const degradedCapabilities = buildDegradedCapabilities(
     sessionDir,
     meta,
@@ -746,10 +764,44 @@ export function buildLlmBundle({
     databaseActivity: buildDatabaseActivity(events, session.startMs),
     media,
     degradedCapabilities,
+    completeness,
     redaction,
     limitations,
     inspectionGuide: buildInspectionGuide(artifacts),
   };
+}
+
+function buildCompleteness(events: BugEvent[]): LlmBundleCompleteness {
+  const gapsBySurface: Record<string, number> = {};
+  const gapsByReason: Record<string, number> = {};
+  let gapCount = 0;
+
+  for (const event of events) {
+    if (event.k !== CAPTURE_GAP_EVENT_KIND) continue;
+    gapCount += 1;
+    const payload = isRecord(event.d) ? event.d : {};
+    const surface =
+      typeof payload.surface === "string" ? payload.surface : "unknown";
+    const reason =
+      typeof payload.reason === "string" ? payload.reason : "unknown";
+    gapsBySurface[surface] = (gapsBySurface[surface] ?? 0) + 1;
+    gapsByReason[reason] = (gapsByReason[reason] ?? 0) + 1;
+  }
+
+  const hasBackendEvidence = events.some((event) =>
+    event.k.startsWith("backend.req."),
+  );
+  const hasDbDiffEvidence = events.some(
+    (event) => event.k === DB_DIFF_EVENT_KIND,
+  );
+  const grade =
+    gapCount === 0
+      ? "complete"
+      : hasBackendEvidence && hasDbDiffEvidence
+        ? "degraded"
+        : "fragmentary";
+
+  return { gapCount, gapsBySurface, gapsByReason, grade };
 }
 
 /**

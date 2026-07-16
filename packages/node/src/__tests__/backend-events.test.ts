@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  CAPTURE_GAP_EVENT_KIND,
   BROWSER_REDACTION_POLICY,
   REDACTED_VALUE,
   createCrumbtrailRequestHeaders,
+  type BugEvent,
 } from "crumbtrail-core";
 import {
   BACKEND_REQUEST_END_EVENT,
@@ -12,6 +14,7 @@ import {
   buildBackendRequestErrorEvent,
   buildBackendRequestStartEvent,
 } from "../backend-events";
+import { instrumentPgClient, resolveDbRequestContext } from "../db";
 
 describe("backend event contract helpers", () => {
   it("links backend start events from core-created Crumbtrail request headers", () => {
@@ -307,5 +310,54 @@ describe("backend event contract helpers", () => {
 
     expect(event.offsetMs).toBeUndefined();
     expect(event.t).toBe(1000);
+  });
+
+  it("uses traceparent as the request id and preserves the database join after custom headers are stripped", async () => {
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const input = {
+      now: 1_700_000_000_000,
+      method: "POST",
+      url: "/api/orders",
+      headers: {
+        traceparent: `00-${traceId}-00f067aa0ba902b7-01`,
+      },
+    };
+    const completenessEvents: BugEvent[] = [];
+    const requestEvent = buildBackendRequestStartEvent({
+      ...input,
+      emit: (event) => completenessEvents.push(event),
+    });
+    const context = resolveDbRequestContext(input);
+    const dbEvents: BugEvent[] = [];
+    const client = {
+      query: async (_text?: unknown, _params?: unknown) => ({
+        rows: [{ id: 42, status: "created" }],
+        rowCount: 1,
+      }),
+    };
+    const db = instrumentPgClient(client, {
+      ...context,
+      emit: (event) => dbEvents.push(event),
+    });
+
+    await db.query("UPDATE orders SET status = $1 WHERE id = $2", [
+      "created",
+      42,
+    ]);
+
+    expect(requestEvent.d).toMatchObject({
+      requestId: traceId,
+      correlation: {
+        status: "missing-session",
+        requestIdSource: "traceparent",
+      },
+    });
+    expect(completenessEvents).toHaveLength(1);
+    expect(completenessEvents[0]).toMatchObject({
+      k: CAPTURE_GAP_EVENT_KIND,
+      d: { surface: "backend_request", reason: "header_stripped" },
+    });
+    expect(dbEvents).toHaveLength(1);
+    expect(dbEvents[0].d).toMatchObject({ requestId: traceId });
   });
 });

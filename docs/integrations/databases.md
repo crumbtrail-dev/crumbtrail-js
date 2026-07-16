@@ -102,10 +102,36 @@ Fully synchronous — events are emitted before `run()` returns. Inserts are re-
 `lastInsertRowid`; UPDATE/DELETE images come from pre/post SELECTs by WHERE and primary key.
 `WITHOUT ROWID` tables and multi-row statements degrade to image-less diffs.
 
+## Capture completeness (gap records)
+
+Instrumentation never throws into your query, but when it cannot capture something on the
+differentiated path it no longer stays silent: it emits a structured `k:'capture_gap'` event
+(`surface`, `reason`, bounded and redacted `detail`) so an incomplete bundle is distinguishable
+from a complete one. Reasons include `unparsed_sql` (a statement the SQL classifier could not
+resolve, so no diff was produced), `uninstrumented_client` (a pooled client that could not be
+wrapped), and `capture_exception` (a diff emit that failed). SQL classification uses a real
+multi dialect parser; anything it cannot classify becomes an `unparsed_sql` gap rather than a
+missing diff, and pooled clients acquired through `pool.connect()` (promise and callback style)
+are instrumented so the pool path no longer bypasses capture.
+
+Gap events flow through the required `emit` sink. If that sink itself fails, the gap is routed to
+an independent fallback so a reporting failure is still recorded:
+
+- `emitGap` / `onGap` — optional independent sink for `capture_gap` events used when the primary
+  `emit` sink throws (never re-enters `emit`).
+
+The assembled bundle carries a `completeness` section: gap counts by surface and reason plus a
+derived grade of `complete`, `degraded`, or `fragmentary`, so a consuming agent knows how much of
+the differentiated path was captured.
+
 ## Options shared by every engine
 
 - `emit` (required) — sink for the events, e.g. forward to `sendBackendEvent`.
-- `requestId` / `getRequestId` / `sessionId` — request-scope correlation (see above).
+- `emitGap` / `onGap` — optional independent sink for `capture_gap` events (fallback when `emit`
+  throws).
+- `requestId` / `getRequestId` / `sessionId` — request-scope correlation (see above). Resolution
+  falls back to a W3C `traceparent` header when the Crumbtrail headers were stripped by a gateway,
+  so the browser to backend to SQL join survives.
 - `captureBefore` — record UPDATE pre-images (deletes always carry their removed row).
 - `captureReads` — opt-in capped `db.read` capture of SELECT rows (off by default; raises PII
   surface).

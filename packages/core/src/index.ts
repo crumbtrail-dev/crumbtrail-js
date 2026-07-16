@@ -29,6 +29,8 @@ export {
   resolveOutboundCorrelation,
 } from "./correlation";
 export type { W3CTraceContext, OutboundCorrelation } from "./correlation";
+export { buildCaptureGapEvent } from "./capture-gap";
+export type { BuildCaptureGapEventInput } from "./capture-gap";
 export type {
   AddBugEventOptions,
   BugEvent,
@@ -47,6 +49,7 @@ export type {
   DbEngine,
   DbReadBulkEventData,
   DbReadEventData,
+  CaptureGapEventData,
   EnvDeclaration,
   EnvSnapshot,
   FlagBugOptions,
@@ -68,6 +71,7 @@ export {
   DB_DIFF_EVENT_KIND,
   DB_READ_BULK_EVENT_KIND,
   DB_READ_EVENT_KIND,
+  CAPTURE_GAP_EVENT_KIND,
   DEFAULT_CONFIG,
   PRESET_FULL,
   PRESET_LIGHT,

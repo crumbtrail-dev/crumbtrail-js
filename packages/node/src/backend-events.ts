@@ -2,8 +2,11 @@ import type { BugEvent, RedactionMetadata } from "crumbtrail-core";
 import {
   CRUMBTRAIL_REQUEST_HEADER_LOWER as CORE_CRUMBTRAIL_REQUEST_HEADER,
   CRUMBTRAIL_SESSION_HEADER_LOWER as CORE_CRUMBTRAIL_SESSION_HEADER,
+  W3C_TRACEPARENT_HEADER,
   attachRedactionMetadata,
+  buildCaptureGapEvent,
   mergeRedactionMetadata,
+  parseTraceparent,
   redactTokenLikeString,
   redactUrl,
 } from "crumbtrail-core";
@@ -34,10 +37,7 @@ export type BackendCorrelationStatus =
   | "missing-session-and-request-id";
 
 export type BackendCorrelationSource =
-  | "option"
-  | "header"
-  | "generated"
-  | "missing";
+  "option" | "header" | "traceparent" | "generated" | "missing";
 
 export interface BackendRequestEventInput {
   method?: string;
@@ -50,6 +50,8 @@ export interface BackendRequestEventInput {
   requestId?: string;
   sessionStartedAt?: number | Date;
   now?: number;
+  /** Optional best-effort sink for completeness gaps discovered while resolving correlation. */
+  emit?: (event: BugEvent) => void;
 }
 
 export interface BackendRequestEndEventInput extends BackendRequestEventInput {
@@ -214,11 +216,15 @@ function buildBasePayload(
 function resolveCorrelation(input: BackendRequestEventInput): Correlation {
   const headerSessionId = readHeader(input.headers, CRUMBTRAIL_SESSION_HEADER);
   const headerRequestId = readHeader(input.headers, CRUMBTRAIL_REQUEST_HEADER);
+  const traceparent = parseTraceparent(
+    readHeader(input.headers, W3C_TRACEPARENT_HEADER),
+  );
   const optionSessionId = normalizeId(input.sessionId);
   const optionRequestId = normalizeId(input.requestId);
 
   const sessionId = optionSessionId ?? normalizeId(headerSessionId);
-  const rawRequestId = optionRequestId ?? normalizeId(headerRequestId);
+  const crumbtrailRequestId = optionRequestId ?? normalizeId(headerRequestId);
+  const rawRequestId = crumbtrailRequestId ?? traceparent?.traceId;
   const requestId = rawRequestId ?? generateBackendRequestId();
 
   const sessionIdSource: BackendCorrelationSource = optionSessionId
@@ -230,7 +236,9 @@ function resolveCorrelation(input: BackendRequestEventInput): Correlation {
     ? "option"
     : headerRequestId && rawRequestId
       ? "header"
-      : "generated";
+      : traceparent && rawRequestId
+        ? "traceparent"
+        : "generated";
 
   let status: BackendCorrelationStatus;
   if (sessionId && rawRequestId) status = "linked";
@@ -238,7 +246,44 @@ function resolveCorrelation(input: BackendRequestEventInput): Correlation {
   else if (!sessionId && rawRequestId) status = "missing-session";
   else status = "missing-session-and-request-id";
 
+  if (traceparent && !sessionId) {
+    emitCorrelationGap(input, {
+      reason:
+        !headerSessionId && !headerRequestId
+          ? "header_stripped"
+          : "missing_session_id",
+      detail: "traceparent correlation",
+    });
+  }
+
   return { sessionId, requestId, status, sessionIdSource, requestIdSource };
+}
+
+function emitCorrelationGap(
+  input: BackendRequestEventInput,
+  gap: {
+    reason: "missing_session_id" | "header_stripped";
+    detail: string;
+  },
+): void {
+  if (!input.emit) return;
+  try {
+    input.emit(
+      buildCaptureGapEvent({
+        surface: "backend_request",
+        reason: gap.reason,
+        detail: gap.detail,
+        sessionId:
+          normalizeId(input.sessionId) ??
+          normalizeId(readHeader(input.headers, CRUMBTRAIL_SESSION_HEADER)),
+        t: input.now,
+        sessionStartedAt: input.sessionStartedAt,
+      }),
+    );
+  } catch (error) {
+    // Completeness reporting is best effort and cannot affect the application request.
+    void error;
+  }
 }
 
 function readHeader(

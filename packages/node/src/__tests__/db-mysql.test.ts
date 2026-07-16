@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CAPTURE_GAP_EVENT_KIND,
   DB_DIFF_BULK_EVENT_KIND,
   DB_DIFF_EVENT_KIND,
   DB_READ_BULK_EVENT_KIND,
@@ -54,7 +55,6 @@ describe("instrumentMysqlClient inserts", () => {
 
     await db.query("INSERT INTO orders (name) VALUES (?)", ["Ada"]);
 
-    expect(events).toHaveLength(1);
     const d = events[0].d as unknown as DbDiffEventData;
     expect(d.engine).toBe("mysql");
     expect(d.op).toBe("insert");
@@ -265,6 +265,38 @@ describe("instrumentMysqlClient updates", () => {
     expect(JSON.stringify(events)).not.toContain("tok_secret_should_vanish");
   });
 
+  it("routes a before-only UPDATE emit failure through onGap without changing the host result", async () => {
+    const hostResult = [{ affectedRows: 1 }, undefined] as const;
+    const client = fakeMysqlClient((sql) => {
+      if (/^update/i.test(sql)) return hostResult;
+      if (/ in \(/i.test(sql)) return [[], []]; // post-select, so the row becomes before-only
+      return [[{ id: 2, status: "pending" }], []]; // pre-select
+    });
+    const primaryEvents: BugEvent[] = [];
+    const gapEvents: BugEvent[] = [];
+    const db = instrumentMysqlClient(client, {
+      requestId: "req-before-only-emit-failure",
+      captureBefore: true,
+      emit: (event) => {
+        primaryEvents.push(event);
+        if (event.k === DB_DIFF_EVENT_KIND) throw new Error("sink failure");
+      },
+      onGap: (event) => gapEvents.push(event),
+    });
+
+    const result = await db.query("UPDATE orders SET status = ? WHERE id = ?", [
+      "shipped",
+      2,
+    ]);
+
+    expect(result).toBe(hostResult);
+    expect(primaryEvents).toHaveLength(1);
+    expect(primaryEvents[0].k).toBe(DB_DIFF_EVENT_KIND);
+    expect(gapEvents).toHaveLength(1);
+    expect(gapEvents[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(gapEvents[0].d).toMatchObject({ reason: "capture_exception" });
+  });
+
   it("keeps before-only vanished diffs additive and the bulk accounting sane when an UPDATE exceeds the cap", async () => {
     // Compound edge: rowCount (5) > maxRows (2) + captureBefore on + a vanished capped pk.
     const client = fakeMysqlClient((sql) => {
@@ -391,8 +423,11 @@ describe("instrumentMysqlClient deletes", () => {
 
     // The host DELETE ran and returned its real result unchanged.
     expect(result).toEqual([{ affectedRows: 2 }, undefined]);
-    expect(events).toHaveLength(1);
-    const d = events[0].d as unknown as DbDiffEventData;
+    expect(events[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(events[0].d).toMatchObject({ reason: "capture_exception" });
+    const diff = events.find((event) => event.k === DB_DIFF_EVENT_KIND);
+    expect(diff).toBeDefined();
+    const d = diff!.d as unknown as DbDiffEventData;
     expect(d.op).toBe("delete");
     expect(d.pk).toBeNull();
     expect(d.rowCount).toBe(2);

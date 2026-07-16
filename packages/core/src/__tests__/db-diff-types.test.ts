@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  CAPTURE_GAP_EVENT_KIND,
   DB_DIFF_EVENT_KIND,
+  buildCaptureGapEvent,
   type DbDiffEventData,
   type DbEngine,
   type BugEvent,
@@ -55,5 +57,42 @@ describe("db.diff event kind", () => {
     expect(d.rowCount).toBe(12);
     expect(d.after).toBeUndefined();
     expect(d.before).toBeUndefined();
+  });
+});
+
+describe("capture gap event", () => {
+  it("builds a bounded, redacted completeness event", () => {
+    const event = buildCaptureGapEvent({
+      surface: "db_diff",
+      reason: "unparsed_sql",
+      detail: `UPDATE orders SET note = 'quoted@example.test', email = ada@example.test, phone = +1 (416) 555-0199, account = 123456789012345, token = ghp_abcdefghijklmnopqrstuvwx123456 ${"x".repeat(600)}`,
+      t: 1_700_000_000_250,
+      sessionId: "ses-gap",
+      sessionStartedAt: 1_700_000_000_000,
+    });
+
+    expect(event).toMatchObject({
+      k: CAPTURE_GAP_EVENT_KIND,
+      t: 1_700_000_000_250,
+      sessionId: "ses-gap",
+      offsetMs: 250,
+      d: {
+        kind: "capture_gap",
+        surface: "db_diff",
+        reason: "unparsed_sql",
+        t: 1_700_000_000_250,
+      },
+    });
+    const detail = String(event.d.detail);
+    expect(detail).toContain("[REDACTED]");
+    expect(detail).toContain("UPDATE");
+    expect(detail).toContain("table orders");
+    expect(detail).not.toContain("quoted@example.test");
+    expect(detail).not.toContain("ada@example.test");
+    expect(detail).not.toContain("416");
+    expect(detail).not.toContain("555");
+    expect(detail).not.toContain("123456789012345");
+    expect(detail).not.toContain("ghp_abcdefghijklmnopqrstuvwx123456");
+    expect(detail.length).toBeLessThanOrEqual(500);
   });
 });

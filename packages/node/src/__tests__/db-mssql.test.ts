@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CAPTURE_GAP_EVENT_KIND,
   DB_DIFF_BULK_EVENT_KIND,
   DB_DIFF_EVENT_KIND,
   DB_READ_BULK_EVENT_KIND,
@@ -294,7 +295,7 @@ describe("instrumentMssqlPool result stripping", () => {
     expect(diffEvents(events)[0].after).toEqual({ id: 1, name: "Ada" });
   });
 
-  it("does not strip or capture when the statement already has an OUTPUT clause", async () => {
+  it("does not strip and records a capture gap when the statement already has an OUTPUT clause", async () => {
     const hostRows = [{ id: 1, name: "Ada" }];
     const pool = fakeMssqlPool(() => ({
       recordset: hostRows,
@@ -317,8 +318,10 @@ describe("instrumentMssqlPool result stripping", () => {
     );
     // ...host keeps its own OUTPUT rows (never stripped)...
     expect(result.recordset).toBe(hostRows);
-    // ...and no diff is captured (can't tell our rows from theirs).
-    expect(events).toHaveLength(0);
+    // ...and no diff is captured because the caller owns the OUTPUT rows.
+    expect(events).toHaveLength(1);
+    expect(events[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(events[0].d).toMatchObject({ reason: "capture_exception" });
   });
 });
 
@@ -501,12 +504,14 @@ describe("instrumentMssqlPool comment-bearing SQL safety gate", () => {
     // The host keeps the batch's SELECT recordset.
     expect(result.recordset).toBe(selectRows);
     expect(result.recordsets).toEqual([selectRows]);
-    // An image-less diff still records the INSERT (rowCount from rowsAffected[0]).
-    const [d] = diffEvents(events);
-    expect(d.op).toBe("insert");
-    expect(d.table).toBe("t");
-    expect(d.pk).toBeNull();
-    expect(d.rowCount).toBe(1);
+    // The batch is explicitly gapped instead of pretending one statement represented the batch.
+    expect(diffEvents(events)).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(events[0].d).toMatchObject({
+      reason: "unparsed_sql",
+      detail: "INSERT",
+    });
   });
 });
 

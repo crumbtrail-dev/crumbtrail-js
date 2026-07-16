@@ -10,13 +10,7 @@ export const CRUMBTRAIL_EVENT_KINDS = {
 } as const;
 
 export type CrumbtrailPlatform =
-  | "web"
-  | "react-native"
-  | "ios"
-  | "android"
-  | "flutter"
-  | "webview"
-  | "node";
+  "web" | "react-native" | "ios" | "android" | "flutter" | "webview" | "node";
 
 export interface CrumbtrailSdkDescriptor {
   name: string;
@@ -136,6 +130,28 @@ export const DB_READ_EVENT_KIND = "db.read" as const;
 
 /** Canonical event kind for an aggregate capped database read summary (`k:'db.read.bulk'`). */
 export const DB_READ_BULK_EVENT_KIND = "db.read.bulk" as const;
+
+/** Canonical event kind for a bounded record of evidence the capture path could not collect. */
+export const CAPTURE_GAP_EVENT_KIND = "capture_gap" as const;
+
+/**
+ * Type specific payload (`d`) of a `k:'capture_gap'` event. `detail` is deliberately a bounded,
+ * redacted diagnostic descriptor such as an error name, table and operation, or leading SQL
+ * keyword. It must never contain raw SQL values or other user data.
+ */
+export interface CaptureGapEventData {
+  kind: "capture_gap";
+  surface: "db_diff" | "backend_request" | "browser" | "queue";
+  reason:
+    | "unparsed_sql"
+    | "uninstrumented_client"
+    | "missing_session_id"
+    | "capture_exception"
+    | "window_miss"
+    | "header_stripped";
+  detail?: string;
+  t: number;
+}
 
 /** Mutating operation a `db.diff` event records. */
 export type DbDiffOp = "insert" | "update" | "delete";

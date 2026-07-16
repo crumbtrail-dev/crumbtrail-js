@@ -64,6 +64,9 @@ export {
   instrumentPgClient,
   instrumentSqliteDatabase,
   resolveDbRequestContext,
+  classifyStatement,
+  leadingSqlKeyword,
+  looksLikePotentialWrite,
   parseMutation,
   parseRead,
   DEFAULT_SENSITIVE_DB_COLUMNS,
@@ -85,6 +88,7 @@ export type {
   DuckTypedSqliteStatement,
   InstrumentDbClientOptions,
   InstrumentPgClientOptions,
+  StatementClassification,
 } from "./db";
 export { inspectSession, formatInspection, InspectError } from "./inspect";
 export type {

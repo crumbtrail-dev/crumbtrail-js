@@ -1,11 +1,14 @@
 import type { DbDiffOp } from "crumbtrail-core";
 import {
+  classifyStatement,
+  leadingSqlKeyword,
   parseMutation,
   parseRead,
   type ParsedMutation,
   type ParsedRead,
 } from "./sql";
 import {
+  emitGap,
   emitDbDiffEvents,
   emitDbReadEvents,
   emitImagelessDbDiff,
@@ -492,10 +495,22 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
     let parsedRead: ParsedRead | undefined;
     let requestId: string | undefined;
     try {
-      parsed = parseMutation(sql);
-      parsedRead = parsed ? undefined : parseRead(sql);
+      const classification = classifyStatement(sql);
+      if (classification.kind === "unparsable" && classification.mayMutate) {
+        emitGap(options, {
+          reason: "unparsed_sql",
+          detail: leadingSqlKeyword(sql),
+        });
+      }
+      parsed =
+        classification.kind === "mutation"
+          ? classification.mutation
+          : undefined;
+      parsedRead =
+        classification.kind === "read" ? classification.read : undefined;
       requestId = options.requestId ?? options.getRequestId?.();
-    } catch {
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
       return request.query(sql);
     }
     if (!requestId) return request.query(sql);
@@ -515,8 +530,8 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
             options,
             emittedReadRowsByRequest,
           });
-        } catch {
-          // Swallow: read capture must never change whether the host query succeeds.
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
         }
       }
       return result;
@@ -543,15 +558,21 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
               options,
             });
           }
-        } catch {
-          // Swallow: capturing a diff must never change whether the host query succeeds.
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
         }
         return result;
       };
 
-    // The statement already carries an OUTPUT clause: run untouched and skip capture (can't tell our
-    // rows from theirs). Never inject a second OUTPUT.
-    if (hasOutputClause(sql)) return request.query(sql);
+    // The statement already carries an OUTPUT clause: run untouched and record why Crumbtrail
+    // cannot distinguish its own rows from the caller's result. Never inject a second OUTPUT.
+    if (hasOutputClause(sql)) {
+      emitGap(options, {
+        reason: "capture_exception",
+        detail: "existing output clause",
+      });
+      return request.query(sql);
+    }
 
     // Pre-injection safety gate (all ops): never edit a statement we cannot confidently tokenize as a
     // single statement. A multi-statement batch, an unterminated string/comment, or a quote hidden in
@@ -583,7 +604,8 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
             row,
           );
         }
-      } catch {
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
         beforeByPk = undefined;
       }
     }
@@ -592,7 +614,8 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
     let injectedText: string | undefined;
     try {
       injectedText = injectOutput(mutation.op, sql);
-    } catch {
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
       injectedText = undefined;
     }
 
@@ -624,8 +647,8 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
             options,
           });
         }
-      } catch {
-        // Swallow: capture must never change whether the host query succeeds.
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
       }
       return fallbackResult;
     }
@@ -656,8 +679,8 @@ export function instrumentMssqlPool<T extends DuckTypedMssqlPool>(
           options,
         });
       }
-    } catch {
-      // Swallow: capturing a diff must never change whether the host query succeeds.
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
     }
 
     return stripInjectedRows(result);

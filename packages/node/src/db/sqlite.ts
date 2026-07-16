@@ -1,11 +1,14 @@
 import {
+  classifyStatement,
   countPlaceholders,
+  leadingSqlKeyword,
   parseMutation,
   parseRead,
   type ParsedMutation,
   type ParsedRead,
 } from "./sql";
 import {
+  emitGap,
   emitDbDiffEvents,
   emitDbReadEvents,
   emitImagelessDbDiff,
@@ -174,7 +177,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
             .prepare(`SELECT * FROM ${parsed.table} WHERE rowid = ?`)
             .get(rowid);
           if (isRecord(row)) afterRow = row;
-        } catch {
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
           afterRow = undefined;
         }
         if (afterRow) {
@@ -201,8 +205,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
           options,
         });
       }
-    } catch {
-      // Swallow: capturing a diff must never change whether the host's query succeeds.
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
     }
     return info;
   };
@@ -235,7 +239,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
         }
         usablePks = pks;
         if (options.captureBefore) beforeByPk = beforeMap;
-      } catch {
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
         usablePks = undefined;
         beforeByPk = undefined;
       }
@@ -258,7 +263,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
             const rows = db.prepare(post.sql).all(...post.params);
             afterRows = (Array.isArray(rows) ? rows : []).filter(isRecord);
           }
-        } catch {
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
           afterRows = undefined;
         }
         if (afterRows && afterRows.length > 0) {
@@ -286,8 +292,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
           options,
         });
       }
-    } catch {
-      // Swallow: capturing a diff must never change whether the host's query succeeds.
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
     }
     return info;
   };
@@ -308,7 +314,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
           .prepare(`SELECT * FROM ${parsed.table} ${parsed.whereClause}`)
           .all(...bindReusedParams(resolved, parsed.whereClause));
         beforeRows = (Array.isArray(preRows) ? preRows : []).filter(isRecord);
-      } catch {
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
         beforeRows = undefined;
       }
     }
@@ -340,8 +347,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
           options,
         });
       }
-    } catch {
-      // Swallow: capturing a diff must never change whether the host's query succeeds.
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
     }
     return info;
   };
@@ -356,7 +363,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
     let requestId: string | undefined;
     try {
       requestId = resolveRequestId();
-    } catch {
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
       return realStmt.run(...args);
     }
     if (!requestId) return realStmt.run(...args);
@@ -383,7 +391,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
     let requestId: string | undefined;
     try {
       requestId = resolveRequestId();
-    } catch {
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
       return result;
     }
     if (!requestId) return result;
@@ -398,8 +407,8 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
         options,
         emittedReadRowsByRequest,
       });
-    } catch {
-      // Swallow: read capture must never change whether the host query succeeds.
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
     }
     return result;
   };
@@ -438,9 +447,24 @@ export function instrumentSqliteDatabase<T extends DuckTypedSqliteDatabase>(
           let parsed: ParsedMutation | undefined;
           let parsedRead: ParsedRead | undefined;
           try {
-            parsed = parseMutation(sql);
-            parsedRead = parsed ? undefined : parseRead(sql);
-          } catch {
+            const classification = classifyStatement(sql);
+            if (
+              classification.kind === "unparsable" &&
+              classification.mayMutate
+            ) {
+              emitGap(options, {
+                reason: "unparsed_sql",
+                detail: leadingSqlKeyword(sql),
+              });
+            }
+            parsed =
+              classification.kind === "mutation"
+                ? classification.mutation
+                : undefined;
+            parsedRead =
+              classification.kind === "read" ? classification.read : undefined;
+          } catch (error) {
+            emitGap(options, { reason: "capture_exception", error });
             return realStmt;
           }
           if (!parsed && !parsedRead) return realStmt;

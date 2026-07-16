@@ -1,6 +1,8 @@
 import {
+  buildCaptureGapEvent,
   DB_DIFF_BULK_EVENT_KIND,
   type BugEvent,
+  type CaptureGapEventData,
   type DbDiffBulkEventData,
   type DbDiffOp,
   type DbEngine,
@@ -33,6 +35,12 @@ export interface InstrumentDbClientOptions {
   sessionId?: string;
   /** Sink for emitted `db.diff` events (e.g. forward to `sendBackendEvent`). */
   emit: (event: BugEvent) => void;
+  /** A separate, non recursive sink for a capture gap when `emit` fails. */
+  emitGap?: (event: BugEvent) => void;
+  /** Alias for `emitGap` used by hosts that keep gap handling separate from event emission. */
+  onGap?: (event: BugEvent) => void;
+  /** Final host supplied fallback when no dedicated gap sink is available. */
+  onWarning?: (event: BugEvent) => void;
   /** When true, capture the pre-image of UPDATE rows via a SELECT-by-WHERE before mutating. */
   captureBefore?: boolean;
   /** When true, capture capped/redacted SELECT result rows as pre-state read evidence. Default off. */
@@ -49,6 +57,112 @@ export interface InstrumentDbClientOptions {
   maxReadRowsPerRequest?: number;
   now?: () => number;
   sessionStartedAt?: number | Date;
+}
+
+export interface EmitGapInput {
+  reason: Extract<
+    CaptureGapEventData["reason"],
+    "unparsed_sql" | "uninstrumented_client" | "capture_exception"
+  >;
+  /** A safe descriptor only: error name, table and operation, or leading SQL keyword. */
+  detail?: string;
+  error?: unknown;
+}
+
+/**
+ * Records a bounded completeness gap without ever changing host database behavior. A failed
+ * primary event sink must never be retried for the gap because that would repeat the same failure
+ * path. The gap uses only an independent fallback sink.
+ */
+export function emitGap(
+  options: InstrumentDbClientOptions,
+  input: EmitGapInput,
+): void {
+  const event = buildGapEvent(options, input);
+  try {
+    options.emit(event);
+  } catch (error) {
+    emitGapFallback(options, event, error);
+  }
+}
+
+function buildGapEvent(
+  options: InstrumentDbClientOptions,
+  input: EmitGapInput,
+): BugEvent {
+  return buildCaptureGapEvent({
+    surface: "db_diff",
+    reason: input.reason,
+    detail: input.detail ?? captureErrorName(input.error),
+    sessionId: options.sessionId,
+    t: options.now?.(),
+    sessionStartedAt: options.sessionStartedAt,
+  });
+}
+
+/**
+ * Emits a regular database event once. If that primary sink fails, its gap is sent directly to
+ * the independent fallback, never back through `options.emit`.
+ */
+export function emitDbEvent(
+  options: InstrumentDbClientOptions,
+  event: BugEvent,
+): boolean {
+  try {
+    options.emit(event);
+    return true;
+  } catch (error) {
+    emitGapFallback(
+      options,
+      buildGapEvent(options, { reason: "capture_exception", error }),
+      error,
+    );
+    return false;
+  }
+}
+
+function emitGapFallback(
+  options: InstrumentDbClientOptions,
+  event: BugEvent,
+  primaryError: unknown,
+): void {
+  const fallback = options.emitGap ?? options.onGap ?? options.onWarning;
+  if (fallback) {
+    try {
+      fallback(event);
+      return;
+    } catch (fallbackError) {
+      retainUnroutedGap(event, primaryError, fallbackError);
+      return;
+    }
+  }
+  retainUnroutedGap(event, primaryError);
+}
+
+/**
+ * A process local last resort preserves the most recent gap without calling user code. It is
+ * deliberately bounded and is only reached when every configured reporting sink has failed.
+ */
+const unroutedCaptureGaps: BugEvent[] = [];
+const MAX_UNROUTED_CAPTURE_GAPS = 20;
+
+function retainUnroutedGap(
+  event: BugEvent,
+  _primaryError: unknown,
+  _fallbackError?: unknown,
+): void {
+  unroutedCaptureGaps.push(event);
+  if (unroutedCaptureGaps.length > MAX_UNROUTED_CAPTURE_GAPS) {
+    unroutedCaptureGaps.shift();
+  }
+}
+
+/** Returns only an error class name, never a message, stack, query, or bind value. */
+export function captureErrorName(error: unknown): string {
+  if (error instanceof Error && error.name) return error.name.slice(0, 120);
+  if (isRecord(error) && typeof error.name === "string")
+    return error.name.slice(0, 120);
+  return typeof error === "string" ? "Error" : "UnknownError";
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -192,7 +306,7 @@ export function emitDbDiffEvents(input: {
         ? { before: row }
         : { after: row, before: beforeByPk?.get(pkKey(pk)) }),
     });
-    options.emit(event);
+    if (!emitDbEvent(options, event)) return;
   }
 
   if (rowCount > maxRows) {
@@ -207,7 +321,8 @@ export function emitDbDiffEvents(input: {
       );
       if (samplePk) samplePks.push(samplePk);
     }
-    options.emit(
+    emitDbEvent(
+      options,
       buildDbDiffBulkEvent({
         engine,
         op,
@@ -238,24 +353,30 @@ export function emitImagelessDbDiff(input: {
   options: InstrumentDbClientOptions;
 }): void {
   const { engine, op, table, requestId, rowCount, options } = input;
-  options.emit(
-    buildDbDiffEvent({
-      engine,
-      op,
-      table,
-      pk: null,
-      rowCount,
-      requestId,
-      sessionId: options.sessionId,
-      redactColumns: options.redactColumns,
-      now: options.now?.(),
-      sessionStartedAt: options.sessionStartedAt,
-    }),
-  );
+  if (
+    !emitDbEvent(
+      options,
+      buildDbDiffEvent({
+        engine,
+        op,
+        table,
+        pk: null,
+        rowCount,
+        requestId,
+        sessionId: options.sessionId,
+        redactColumns: options.redactColumns,
+        now: options.now?.(),
+        sessionStartedAt: options.sessionStartedAt,
+      }),
+    )
+  ) {
+    return;
+  }
 
   const maxRows = normalizeMaxRowsPerStatement(options.maxRowsPerStatement);
   if (rowCount > maxRows) {
-    options.emit(
+    emitDbEvent(
+      options,
       buildDbDiffBulkEvent({
         engine,
         op,
@@ -311,19 +432,24 @@ export function emitDbReadEvents(input: {
     const pk = extractPk(row, table, options.pkColumns);
     const samplePk = redactPkSample(pk, sensitive);
     if (samplePks.length < 3 && samplePk) samplePks.push(samplePk);
-    options.emit(
-      buildDbReadEvent({
-        engine,
-        table,
-        pk,
-        row,
-        requestId,
-        sessionId: options.sessionId,
-        redactColumns: options.redactColumns,
-        now: options.now?.(),
-        sessionStartedAt: options.sessionStartedAt,
-      }),
-    );
+    if (
+      !emitDbEvent(
+        options,
+        buildDbReadEvent({
+          engine,
+          table,
+          pk,
+          row,
+          requestId,
+          sessionId: options.sessionId,
+          redactColumns: options.redactColumns,
+          now: options.now?.(),
+          sessionStartedAt: options.sessionStartedAt,
+        }),
+      )
+    ) {
+      return;
+    }
     emittedReadRowsByRequest.set(
       requestId,
       (emittedReadRowsByRequest.get(requestId) ?? 0) + 1,
@@ -342,7 +468,8 @@ export function emitDbReadEvents(input: {
       );
       if (samplePk) samplePks.push(samplePk);
     }
-    options.emit(
+    emitDbEvent(
+      options,
       buildDbReadBulkEvent({
         engine,
         table,

@@ -107,6 +107,83 @@ describe("llm bundle", () => {
     expect(bundle.environment).toBeNull();
   });
 
+  it("summarizes capture gaps into deterministic completeness grades", () => {
+    const start = 1_700_000_250_000;
+    const degradedEvents: BugEvent[] = [
+      {
+        t: start,
+        k: "backend.req.start",
+        d: { requestId: "trace-1" },
+      },
+      {
+        t: start + 1,
+        k: "db.diff",
+        d: {
+          engine: "postgres",
+          op: "update",
+          table: "orders",
+          pk: { id: 1 },
+          requestId: "trace-1",
+        },
+      },
+      {
+        t: start + 2,
+        k: "capture_gap",
+        d: {
+          kind: "capture_gap",
+          surface: "db_diff",
+          reason: "unparsed_sql",
+          t: start + 2,
+        },
+      },
+      {
+        t: start + 3,
+        k: "capture_gap",
+        d: {
+          kind: "capture_gap",
+          surface: "backend_request",
+          reason: "header_stripped",
+          t: start + 3,
+        },
+      },
+    ];
+    const index: SessionIndexLike = {
+      id: "ses-completeness",
+      start,
+      end: start + 3,
+      dur: 3,
+      evts: degradedEvents.length,
+      stats: {},
+    };
+
+    expect(
+      writeLlmBundle({ sessionDir: tmpDir, events: degradedEvents, index })
+        .completeness,
+    ).toEqual({
+      gapCount: 2,
+      gapsBySurface: { db_diff: 1, backend_request: 1 },
+      gapsByReason: { unparsed_sql: 1, header_stripped: 1 },
+      grade: "degraded",
+    });
+
+    const fragmentary = writeLlmBundle({
+      sessionDir: tmpDir,
+      events: degradedEvents.filter((event) => event.k === "capture_gap"),
+      index: { ...index, evts: 2 },
+    });
+    expect(fragmentary.completeness.grade).toBe("fragmentary");
+
+    const complete = writeLlmBundle({
+      sessionDir: tmpDir,
+      events: [{ t: start, k: "nav", d: {} }],
+      index: { ...index, evts: 1 },
+    });
+    expect(complete.completeness).toMatchObject({
+      gapCount: 0,
+      grade: "complete",
+    });
+  });
+
   it("surfaces OTel DB activity as statements, not row diffs", () => {
     const events: BugEvent[] = [
       {

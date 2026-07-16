@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { createCrumbtrailRequestHeaders } from "crumbtrail-core";
+import {
+  CAPTURE_GAP_EVENT_KIND,
+  DB_DIFF_EVENT_KIND,
+  createCrumbtrailRequestHeaders,
+} from "crumbtrail-core";
 import type { BugEvent, DbDiffEventData } from "crumbtrail-core";
 import { buildBackendRequestErrorEvent } from "../backend-events";
 import {
@@ -239,30 +243,46 @@ describe("instrumentPgClient", () => {
       rows: [{ id: 3, status: "shipped" }],
       rowCount: 1,
     });
-    // A diff was still emitted, just without a before-image.
-    const d = events[0].d as unknown as DbDiffEventData;
+    // The failed capture path is visible, and a diff was still emitted without a before image.
+    expect(events[0].k).toBe(CAPTURE_GAP_EVENT_KIND);
+    expect(events[0].d).toMatchObject({ reason: "capture_exception" });
+    const diff = events.find((event) => event.k === DB_DIFF_EVENT_KIND);
+    expect(diff).toBeDefined();
+    const d = diff!.d as unknown as DbDiffEventData;
     expect(d.op).toBe("update");
     expect(d.after).toEqual({ id: 3, status: "shipped" });
     expect(d.before).toBeUndefined();
   });
 
-  it("does not break the host query when emission throws", async () => {
+  it("routes a failed db.diff emission through the non recursive gap sink", async () => {
     const client = fakePgClient(() => ({
       rows: [{ id: 1, name: "Ada" }],
       rowCount: 1,
     }));
+    const primaryEvents: BugEvent[] = [];
+    const gapEvents: BugEvent[] = [];
     const db = instrumentPgClient(client, {
       requestId: "req-1",
-      emit: () => {
-        throw new Error("sink exploded");
+      emit: (event) => {
+        primaryEvents.push(event);
+        if (event.k === DB_DIFF_EVENT_KIND) {
+          throw new Error("sink exploded");
+        }
       },
+      onGap: (event) => gapEvents.push(event),
     });
 
-    // A failing emit must degrade to "no diff emitted", never propagate to the caller's query.
     const result = await db.query("INSERT INTO orders (name) VALUES ($1)", [
       "Ada",
     ]);
     expect(result).toEqual({ rows: [{ id: 1, name: "Ada" }], rowCount: 1 });
+    expect(primaryEvents).toHaveLength(1);
+    expect(primaryEvents[0].k).toBe(DB_DIFF_EVENT_KIND);
+    expect(gapEvents).toHaveLength(1);
+    expect(gapEvents[0]).toMatchObject({
+      k: CAPTURE_GAP_EVENT_KIND,
+      d: { reason: "capture_exception" },
+    });
   });
 
   it("redacts a secret column captured from a RETURNING row", async () => {
@@ -280,6 +300,171 @@ describe("instrumentPgClient", () => {
     expect(JSON.stringify(events[0])).not.toContain(
       "tok_secret_value_should_vanish",
     );
+  });
+
+  it("captures mutations issued through a client acquired from pool.connect", async () => {
+    const acquired = {
+      released: false,
+      async query(_text?: unknown, _params?: unknown) {
+        return { rows: [{ id: 9, status: "ready" }], rowCount: 1 };
+      },
+      release() {
+        this.released = true;
+      },
+    };
+    const pool = {
+      query: acquired.query,
+      async connect() {
+        return acquired;
+      },
+    };
+    const events: BugEvent[] = [];
+    const db = instrumentPgClient(pool, {
+      requestId: "req-pool",
+      emit: (event) => events.push(event),
+    });
+
+    const client = await db.connect();
+    await client.query("UPDATE orders SET status = $1 WHERE id = $2", [
+      "ready",
+      9,
+    ]);
+    client.release();
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      k: DB_DIFF_EVENT_KIND,
+      d: { requestId: "req-pool", table: "orders", op: "update" },
+    });
+    expect(acquired.released).toBe(true);
+  });
+
+  it("captures a mutation from a callback style pool.connect client", async () => {
+    const acquired = fakePgClient(() => ({
+      rows: [{ id: 10, status: "ready" }],
+      rowCount: 1,
+    }));
+    let released = false;
+    const pool = {
+      query: acquired.query,
+      connect(
+        callback: (
+          error: Error | null,
+          client: typeof acquired,
+          release: () => void,
+        ) => void,
+      ) {
+        callback(null, acquired, () => {
+          released = true;
+        });
+      },
+    };
+    const events: BugEvent[] = [];
+    const db = instrumentPgClient(pool, {
+      requestId: "req-callback-pool",
+      emit: (event) => events.push(event),
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      db.connect((error, client, release) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        client
+          .query("UPDATE orders SET status = $1 WHERE id = $2", ["ready", 10])
+          .then(() => {
+            release();
+            resolve();
+          }, reject);
+      });
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      k: DB_DIFF_EVENT_KIND,
+      d: { requestId: "req-callback-pool", table: "orders", op: "update" },
+    });
+    expect(released).toBe(true);
+  });
+
+  it("keeps pool.query instrumented when pool.connect also supports callbacks", async () => {
+    const pool = fakePgClient(() => ({
+      rows: [{ id: 11, status: "ready" }],
+      rowCount: 1,
+    }));
+    const events: BugEvent[] = [];
+    const instrumented = instrumentPgClient(
+      {
+        ...pool,
+        connect(_callback: unknown) {
+          return undefined;
+        },
+      },
+      {
+        requestId: "req-pool-query",
+        emit: (event) => events.push(event),
+      },
+    );
+
+    await instrumented.query(
+      "UPDATE orders SET status = $1 WHERE id = $2",
+      ["ready", 11],
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      k: DB_DIFF_EVENT_KIND,
+      d: { requestId: "req-pool-query", table: "orders", op: "update" },
+    });
+    expect(pool.calls[0].text).toMatch(/returning \*/i);
+  });
+
+  it("records an uninstrumented client gap and preserves a callback client when wrapping fails", () => {
+    const acquired = new Proxy(
+      {
+        async query(_text?: unknown, _params?: unknown) {
+          return { rows: [], rowCount: 0 };
+        },
+      },
+      {
+        get(target, prop, receiver) {
+          if (prop === "query") throw new Error("query inspection failed");
+          return Reflect.get(target, prop, receiver);
+        },
+      },
+    );
+    const pool = {
+      async query(_text?: unknown, _params?: unknown) {
+        return { rows: [], rowCount: 0 };
+      },
+      connect(
+        callback: (
+          error: Error | null,
+          client: unknown,
+          release: () => void,
+        ) => void,
+      ) {
+        callback(null, acquired, () => undefined);
+      },
+    };
+    const events: BugEvent[] = [];
+    const db = instrumentPgClient(pool, {
+      requestId: "req-uninstrumented",
+      emit: (event) => events.push(event),
+    });
+    let callbackClient: unknown;
+
+    db.connect((_error, client) => {
+      callbackClient = client;
+    });
+
+    expect(callbackClient).toBe(acquired);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      k: CAPTURE_GAP_EVENT_KIND,
+      d: { reason: "uninstrumented_client" },
+    });
   });
 });
 

@@ -1,11 +1,14 @@
 import {
+  classifyStatement,
   ensureReturning,
+  leadingSqlKeyword,
   parseMutation,
   parseRead,
   type ParsedMutation,
   type ParsedRead,
 } from "./sql";
 import {
+  emitGap,
   emitDbDiffEvents,
   emitDbReadEvents,
   extractPk,
@@ -41,7 +44,8 @@ const ENGINE = "postgres" as const;
  * `captureBefore`). The shim appends `RETURNING *` when absent to read the after-image, and reads
  * the result rows otherwise. Only the promise-returning `query(text, params)` form is instrumented;
  * config-object and callback forms pass straight through. Engine is Postgres only; the builder is
- * driver-agnostic so other engines can slot in later.
+ * driver-agnostic so other engines can slot in later. A pool's `connect()` result is proxied too,
+ * so mutations issued through acquired clients retain the same instrumentation and pool lifecycle.
  *
  * Limitations: trigger/cascade side effects and rows changed by other tables are not captured; the
  * pre-image SELECT for `captureBefore` reuses the statement's WHERE clause + params, so it supports
@@ -65,10 +69,22 @@ export function instrumentPgClient<T extends DuckTypedPgClient>(
     let parsedRead: ParsedRead | undefined;
     let requestId: string | undefined;
     try {
-      parsed = parseMutation(text);
-      parsedRead = parsed ? undefined : parseRead(text);
+      const classification = classifyStatement(text);
+      if (classification.kind === "unparsable" && classification.mayMutate) {
+        emitGap(options, {
+          reason: "unparsed_sql",
+          detail: leadingSqlKeyword(text),
+        });
+      }
+      parsed =
+        classification.kind === "mutation"
+          ? classification.mutation
+          : undefined;
+      parsedRead =
+        classification.kind === "read" ? classification.read : undefined;
       requestId = options.requestId ?? options.getRequestId?.();
-    } catch {
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
       return client.query(text, params);
     }
     if (!requestId) return client.query(text, params);
@@ -92,8 +108,8 @@ export function instrumentPgClient<T extends DuckTypedPgClient>(
             options,
             emittedReadRowsByRequest,
           });
-        } catch {
-          // Swallow: read capture must never change whether the host query succeeds.
+        } catch (error) {
+          emitGap(options, { reason: "capture_exception", error });
         }
       }
       return result;
@@ -118,7 +134,8 @@ export function instrumentPgClient<T extends DuckTypedPgClient>(
             row,
           );
         }
-      } catch {
+      } catch (error) {
+        emitGap(options, { reason: "capture_exception", error });
         beforeByPk = undefined;
       }
     }
@@ -128,7 +145,8 @@ export function instrumentPgClient<T extends DuckTypedPgClient>(
     let instrumentedText: string;
     try {
       instrumentedText = ensureReturning(text);
-    } catch {
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
       return client.query(text, paramArray);
     }
 
@@ -153,8 +171,8 @@ export function instrumentPgClient<T extends DuckTypedPgClient>(
         rowCount,
         options,
       });
-    } catch {
-      // Swallow: capturing a diff must never change whether the host's query succeeds.
+    } catch (error) {
+      emitGap(options, { reason: "capture_exception", error });
     }
 
     return result;
@@ -163,8 +181,56 @@ export function instrumentPgClient<T extends DuckTypedPgClient>(
   return new Proxy(client, {
     get(target, prop, receiver) {
       if (prop === "query") return wrappedQuery;
+      if (prop === "connect") {
+        const connect = Reflect.get(target, prop, receiver);
+        if (typeof connect !== "function") return connect;
+        return (...args: unknown[]) => {
+          const callback = args[0];
+          if (typeof callback === "function") {
+            const wrappedCallback = (
+              error: unknown,
+              acquired: unknown,
+              release: unknown,
+            ) => {
+              if (error || acquired == null) {
+                return callback(error, acquired, release);
+              }
+              return callback(
+                error,
+                instrumentAcquiredClient(acquired, options),
+                release,
+              );
+            };
+            return (connect as (...values: unknown[]) => unknown).apply(target, [
+              wrappedCallback,
+            ]);
+          }
+
+          return Promise.resolve(
+            (connect as (...values: unknown[]) => unknown).apply(target, args),
+          ).then((acquired) => instrumentAcquiredClient(acquired, options));
+        };
+      }
       const value = Reflect.get(target, prop, receiver);
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function instrumentAcquiredClient(
+  acquired: unknown,
+  options: InstrumentPgClientOptions,
+): unknown {
+  try {
+    if (
+      !acquired ||
+      typeof (acquired as { query?: unknown }).query !== "function"
+    ) {
+      throw new TypeError("Pool client cannot be instrumented");
+    }
+    return instrumentPgClient(acquired as DuckTypedPgClient, options);
+  } catch (error) {
+    emitGap(options, { reason: "uninstrumented_client", error });
+    return acquired;
+  }
 }

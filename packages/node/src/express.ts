@@ -48,9 +48,7 @@ export type CrumbtrailExpressErrorMiddleware = (
 ) => void;
 
 type RequestValueResolver =
-  | string
-  | undefined
-  | ((req: CrumbtrailExpressRequest) => string | undefined);
+  string | undefined | ((req: CrumbtrailExpressRequest) => string | undefined);
 type SessionStartedAtResolver =
   | number
   | Date
@@ -195,6 +193,12 @@ function readRequestInput(
     sessionId: state?.sessionId ?? resolveRequestValue(options.sessionId, req),
     requestId: state?.requestId ?? resolveRequestValue(options.requestId, req),
     sessionStartedAt: resolveSessionStartedAt(options.sessionStartedAt, req),
+    ...(state
+      ? {}
+      : {
+          emit: (event: BugEvent) =>
+            attemptSend(event, options, event.sessionId),
+        }),
   };
 }
 
