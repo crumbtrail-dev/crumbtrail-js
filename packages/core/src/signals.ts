@@ -38,10 +38,22 @@ export function errorSignature(event: BugEvent): string {
  * Reactive baseline detector: an uncaught error or unhandled rejection. Each distinct error
  * signature flags once per session (dedup is enforced by the controller via {@link Signal.key}).
  */
-export function errorDetector(): SignalDetector {
+export interface ErrorDetectorOptions {
+  uncaughtError?: boolean;
+  unhandledRejection?: boolean;
+}
+
+export function errorDetector(
+  options: ErrorDetectorOptions = {},
+): SignalDetector {
   return {
     inspect(event) {
-      if (event.k !== "err" && event.k !== "rej") return null;
+      if (
+        (event.k !== "err" && event.k !== "rej") ||
+        (event.k === "err" && options.uncaughtError === false) ||
+        (event.k === "rej" && options.unhandledRejection === false)
+      )
+        return null;
       const msg = typeof event.d.msg === "string" ? event.d.msg : undefined;
       return {
         tag: "auto:error",
@@ -49,6 +61,24 @@ export function errorDetector(): SignalDetector {
         note: msg
           ? `Auto-captured after error: ${msg}`
           : "Auto-captured after error",
+      };
+    },
+  };
+}
+
+/** React immediately to an instrumented server error response. */
+export function request5xxDetector(): SignalDetector {
+  return {
+    inspect(event) {
+      if (event.k !== "net.res" || typeof event.d.st !== "number")
+        return null;
+      if (event.d.st < 500) return null;
+      const status = event.d.st;
+      const requestId = typeof event.d.id === "number" ? event.d.id : "unknown";
+      return {
+        tag: "auto:request-5xx",
+        key: `request-5xx:${requestId}:${status}`,
+        note: `Auto captured after request returned ${status}`,
       };
     },
   };

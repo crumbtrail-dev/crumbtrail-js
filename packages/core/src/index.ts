@@ -31,11 +31,19 @@ export {
 export type { W3CTraceContext, OutboundCorrelation } from "./correlation";
 export { buildCaptureGapEvent } from "./capture-gap";
 export type { BuildCaptureGapEventInput } from "./capture-gap";
+export {
+  buildMaskedDomSnapshot,
+  isBlocked,
+  isUnmasked,
+  maskText,
+} from "./masking";
 export type {
   AddBugEventOptions,
   BugEvent,
+  CaptureConfigPollingOptions,
   CrumbtrailCapabilities,
   CrumbtrailConfig,
+  CrumbtrailIdentity,
   CrumbtrailPreset,
   CrumbtrailPlatform,
   CrumbtrailSdkDescriptor,
@@ -96,6 +104,7 @@ export { createAutoFlagController } from "./auto-flag";
 export type { AutoFlagOptions, AutoFlagController } from "./auto-flag";
 export {
   errorDetector,
+  request5xxDetector,
   errorSignature,
   rageClickDetector,
   retryStormDetector,
@@ -105,6 +114,7 @@ export {
 export type {
   Signal,
   SignalDetector,
+  ErrorDetectorOptions,
   RageClickOptions,
   RetryStormOptions,
   SlowResponseOptions,

@@ -7,6 +7,7 @@ import {
   redactInputValue,
   redactValue,
 } from "../redaction";
+import { isBlocked, isUnmasked } from "../masking";
 
 const SENSITIVE_AUTOCOMPLETE_TOKENS = new Set([
   "cc-additional-name",
@@ -88,6 +89,9 @@ export function keystrokeCollector(
   }
 
   function shouldMaskKey(target: EventTarget | null): boolean {
+    const explicitlyUnmasked = target instanceof Element && isUnmasked(target);
+    if (!explicitlyUnmasked && (config.maskAllText || config.maskAllInputs))
+      return true;
     if (hasSensitiveMarker(target)) return true;
     const type = inputType(target);
     if (
@@ -112,6 +116,7 @@ export function keystrokeCollector(
     if (dir === "up") lastKeyupTs = t;
 
     const target = e.target;
+    if (target instanceof Element && isBlocked(target)) return;
     const el: Record<string, unknown> = {
       tag: target instanceof Element ? target.tagName : "UNKNOWN",
     };

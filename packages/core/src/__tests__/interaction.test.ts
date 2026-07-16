@@ -3,6 +3,7 @@ import { EventBus } from "../event-bus";
 import type { BugEvent, CrumbtrailConfig } from "../types";
 import { DEFAULT_CONFIG } from "../types";
 import { REDACTED_VALUE } from "../redaction";
+import { maskText } from "../masking";
 import { interactionCollector } from "../collectors/interaction";
 
 function makeConfig(
@@ -48,7 +49,7 @@ describe("interactionCollector redaction", () => {
 
     const inputEvent = events.find((event) => event.k === "inp");
     expect(inputEvent?.d).toMatchObject({
-      val: REDACTED_VALUE,
+      val: maskText("super-secret-password"),
       ev: "input",
       valSummary: expect.objectContaining({
         kind: "input",
@@ -119,7 +120,7 @@ describe("interactionCollector redaction", () => {
     expect(
       inputEvents.find((event) => event.d.ev === "change")?.d,
     ).toMatchObject({
-      val: REDACTED_VALUE,
+      val: maskText("4111111111111111"),
       valSummary: expect.objectContaining({
         kind: "input",
         reason: "sensitive_input_value",

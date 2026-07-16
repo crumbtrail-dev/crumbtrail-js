@@ -2,6 +2,7 @@ import type { EventBus } from "../event-bus";
 import type { CrumbtrailConfig, CollectorCleanup } from "../types";
 import { truncate, now } from "../utils";
 import { attachRedactionMetadata, redactNetworkTextBody } from "../redaction";
+import { isBlocked, isUnmasked, maskText } from "../masking";
 
 export function clipboardCollector(
   bus: EventBus,
@@ -11,6 +12,8 @@ export function clipboardCollector(
 
   const handler = (event: Event) => {
     const type = event.type as "copy" | "cut" | "paste";
+    const target = resolveTarget(event);
+    if (target && isBlocked(target)) return;
     let txt: string | undefined;
 
     if (type === "paste") {
@@ -23,7 +26,11 @@ export function clipboardCollector(
     const d: Record<string, unknown> = { op: type };
     if (txt) {
       const truncated = truncate(txt, maxLen);
-      if (config.captureRawClipboard) {
+      if (target && isUnmasked(target)) {
+        d.txt = truncated;
+      } else if (config.maskAllText) {
+        d.txt = maskText(truncated);
+      } else if (config.captureRawClipboard) {
         d.txt = truncated;
       } else {
         const redacted = redactNetworkTextBody(truncated, {
@@ -35,9 +42,9 @@ export function clipboardCollector(
         attachRedactionMetadata(d, redacted.metadata);
       }
     }
-    if (event.target instanceof Element) {
-      const el: Record<string, unknown> = { tag: event.target.tagName };
-      if (event.target.id) el.id = event.target.id;
+    if (target) {
+      const el: Record<string, unknown> = { tag: target.tagName };
+      if (target.id) el.id = target.id;
       d.el = el;
     }
 
@@ -53,4 +60,14 @@ export function clipboardCollector(
     document.removeEventListener("cut", handler, true);
     document.removeEventListener("paste", handler, true);
   };
+}
+
+function resolveTarget(event: Event): Element | undefined {
+  if (event.target instanceof Element) return event.target;
+  const selection = window.getSelection();
+  const anchor = selection?.anchorNode;
+  if (!anchor) return undefined;
+  return anchor instanceof Element
+    ? anchor
+    : (anchor.parentElement ?? undefined);
 }

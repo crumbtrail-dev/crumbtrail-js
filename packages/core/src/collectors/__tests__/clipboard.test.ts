@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventBus } from "../../event-bus";
 import { DEFAULT_CONFIG, type BugEvent } from "../../types";
+import { maskText } from "../../masking";
 import { clipboardCollector } from "../clipboard";
 
 function makeClipboardEvent(
@@ -39,20 +40,17 @@ describe("clipboardCollector", () => {
     expect(events).toHaveLength(1);
     expect(events[0].k).toBe("clip");
     expect(events[0].d.op).toBe("paste");
-    expect(events[0].d.txt).toBe("pasted text");
+    expect(events[0].d.txt).toBe(maskText("pasted text"));
   });
 
   it("redacts sensitive clipboard text by default", () => {
     document.dispatchEvent(makeClipboardEvent("paste", "password=hunter2"));
     bus.flush();
 
-    expect(events[0].d.txt).toBe("password=[REDACTED]");
-    expect(events[0].d.redaction).toMatchObject({
-      policy: "crumbtrail.browser-redaction.v1",
-    });
+    expect(events[0].d.txt).toBe(maskText("password=hunter2"));
   });
 
-  it("captures raw clipboard text only when explicitly opted in", () => {
+  it("does not let raw clipboard capture bypass default masking", () => {
     cleanup();
     cleanup = clipboardCollector(bus, {
       ...DEFAULT_CONFIG,
@@ -62,7 +60,7 @@ describe("clipboardCollector", () => {
     document.dispatchEvent(makeClipboardEvent("paste", "password=hunter2"));
     bus.flush();
 
-    expect(events[0].d.txt).toBe("password=hunter2");
+    expect(events[0].d.txt).toBe(maskText("password=hunter2"));
     expect(events[0].d.redaction).toBeUndefined();
   });
 
@@ -84,7 +82,7 @@ describe("clipboardCollector", () => {
     bus.flush();
 
     expect(events[0].d.op).toBe("copy");
-    expect(events[0].d.txt).toBe("selected text");
+    expect(events[0].d.txt).toBe(maskText("selected text"));
 
     window.getSelection = origGetSelection;
   });
@@ -99,7 +97,7 @@ describe("clipboardCollector", () => {
     bus.flush();
 
     expect(events[0].d.op).toBe("cut");
-    expect(events[0].d.txt).toBe("cut text");
+    expect(events[0].d.txt).toBe(maskText("cut text"));
 
     window.getSelection = origGetSelection;
   });
