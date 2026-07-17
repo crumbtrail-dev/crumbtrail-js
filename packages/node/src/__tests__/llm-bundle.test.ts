@@ -8,7 +8,8 @@ import {
   writeLlmBundle,
   type SessionIndexLike,
 } from "../llm-bundle";
-import type { EvidenceCandidate } from "../evidence-index";
+import { writeEvidenceIndex, type EvidenceCandidate } from "../evidence-index";
+import { postProcess } from "../post-process";
 
 function expectMarkdownSections(markdown: string, sections: string[]): void {
   for (const section of sections) expect(markdown).toContain(section);
@@ -25,6 +26,407 @@ describe("llm bundle", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("surfaces bounded request bodies for numeric-id network errors in every output", () => {
+    const oversizedBodySecret = "oversized-body-secret";
+    const requestBody = `apiKey=${oversizedBodySecret}&note=${"x".repeat(5_000)}`;
+    const events: BugEvent[] = [
+      {
+        t: 1_700_000_300_000,
+        k: "net.req",
+        offsetMs: 0,
+        d: {
+          id: 42,
+          m: "POST",
+          url: "https://api.example.test/validate",
+          body: requestBody,
+        },
+      },
+      {
+        t: 1_700_000_300_100,
+        k: "net.err",
+        offsetMs: 100,
+        d: {
+          id: 42,
+          m: "POST",
+          url: "https://api.example.test/validate",
+          msg: "Failed to fetch",
+          transport: "fetch",
+        },
+      },
+    ];
+    const index = {
+      id: "ses_failed_body",
+      start: events[0].t,
+      end: events[1].t,
+      dur: 100,
+      evts: events.length,
+      networkErrors: [
+        {
+          t: events[1].t,
+          m: "POST",
+          url: "https://api.example.test/validate",
+          msg: "Failed to fetch",
+          transport: "fetch",
+        },
+      ],
+      stats: { "net.req": 1, "net.err": 1 },
+    };
+
+    const candidates = writeEvidenceIndex({
+      sessionDir: tmpDir,
+      events,
+      index,
+    });
+    const networkError = candidates.find(
+      (candidate) => candidate.detector === "network_error",
+    );
+    const window = fs.readFileSync(
+      path.join(tmpDir, "windows", `${networkError!.id}.md`),
+      "utf-8",
+    );
+    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
+    const failedEntry = bundle.agentContext.timeline.find(
+      (entry) => entry.kind === "failed-request",
+    );
+    const bodySnippet = bundle.browserEvidence.networkErrors[0].requestBody;
+    const serialized = [window, JSON.stringify(bundle), markdown].join("\n");
+
+    expect(networkError).toBeDefined();
+    expect(window).toContain("Request body: [REDACTED_KEY]=[REDACTED]");
+    expect(bundle.browserEvidence.networkErrors[0]).toMatchObject({
+      requestBody: expect.stringContaining("[REDACTED_KEY]=[REDACTED]"),
+    });
+    expect(bodySnippet!.length).toBeLessThanOrEqual(300);
+    expect(markdown).toContain("Request body");
+    expect(bundle.agentContext.schemaVersion).toBe(
+      "crumbtrail.agent_context.v1",
+    );
+    expect(failedEntry).toMatchObject({ requestBody: bodySnippet });
+    expect(serialized).not.toContain(oversizedBodySecret);
+  });
+
+  it("associates same-millisecond network errors through the post-process pipeline", async () => {
+    const t = 1_700_000_300_200;
+    const events: BugEvent[] = [
+      {
+        t: t - 10,
+        k: "net.req",
+        d: {
+          id: "first",
+          m: "POST",
+          url: "https://api.example.test/submit",
+          body: "first-body",
+        },
+      },
+      {
+        t: t - 5,
+        k: "net.req",
+        d: {
+          id: "second",
+          m: "POST",
+          url: "https://api.example.test/submit",
+          body: "second-body",
+        },
+      },
+      {
+        t,
+        k: "net.err",
+        d: {
+          id: "first",
+          m: "POST",
+          url: "https://api.example.test/submit",
+          msg: "Failed to fetch",
+        },
+      },
+      {
+        t,
+        k: "net.err",
+        d: {
+          id: "second",
+          m: "POST",
+          url: "https://api.example.test/submit",
+          msg: "Failed to fetch",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    );
+
+    await postProcess(tmpDir);
+
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+    const bundle = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "llm.json"), "utf-8"),
+    );
+    const candidates = fs
+      .readFileSync(path.join(tmpDir, "candidates.jsonl"), "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const networkCandidates = candidates.filter(
+      (candidate) => candidate.detector === "network_error",
+    );
+
+    expect(index.networkErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ t, id: "first" }),
+        expect.objectContaining({ t, id: "second" }),
+      ]),
+    );
+    expect(index.failedReqs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ t, id: "first", reason: "network_error" }),
+        expect.objectContaining({ t, id: "second", reason: "network_error" }),
+      ]),
+    );
+    expect(networkCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ anchor: expect.objectContaining({ requestId: "first" }) }),
+        expect.objectContaining({ anchor: expect.objectContaining({ requestId: "second" }) }),
+      ]),
+    );
+    expect(networkCandidates).toHaveLength(2);
+    expect(bundle.browserEvidence.networkErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          requestBody: "first-body",
+        }),
+        expect.objectContaining({
+          requestBody: "second-body",
+        }),
+      ]),
+    );
+    expect(bundle.browserEvidence.failedRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          requestBody: "first-body",
+        }),
+        expect.objectContaining({
+          requestBody: "second-body",
+        }),
+      ]),
+    );
+    for (const candidate of networkCandidates) {
+      const window = fs.readFileSync(
+        path.join(tmpDir, "windows", `${candidate.id}.md`),
+        "utf-8",
+      );
+      if (candidate.anchor.requestId === "first") {
+        expect(window).toContain("Request body: first-body");
+        expect(window).not.toContain("Request body: second-body");
+      } else if (candidate.anchor.requestId === "second") {
+        expect(window).toContain("Request body: second-body");
+        expect(window).not.toContain("Request body: first-body");
+      }
+    }
+  });
+
+  it("associates same-millisecond response bodies using numeric and string request ids", () => {
+    const responseTime = 1_700_000_301_000;
+    const events: BugEvent[] = [
+      {
+        t: responseTime - 10,
+        k: "net.req",
+        d: {
+          id: 17,
+          m: "POST",
+          url: "https://api.example.test/numeric",
+          body: "numeric-body",
+        },
+      },
+      {
+        t: responseTime - 5,
+        k: "net.req",
+        d: {
+          id: "string-id",
+          m: "POST",
+          url: "https://api.example.test/string",
+          body: "string-body",
+        },
+      },
+      {
+        t: responseTime,
+        k: "net.res",
+        d: { id: "string-id", st: 500, body: "string-response-body" },
+      },
+      {
+        t: responseTime,
+        k: "net.res",
+        d: { id: 17, st: 500, body: "numeric-response-body" },
+      },
+    ];
+    const index = {
+      id: "ses_same_ms_ids",
+      start: events[0].t,
+      end: responseTime,
+      dur: 10,
+      evts: events.length,
+      failedReqs: [
+        {
+          t: responseTime,
+          id: 17,
+          m: "POST",
+          url: "https://api.example.test/numeric",
+          st: 500,
+        },
+        {
+          t: responseTime,
+          id: "string-id",
+          m: "POST",
+          url: "https://api.example.test/string",
+          st: 500,
+        },
+      ],
+    };
+
+    const candidates = writeEvidenceIndex({
+      sessionDir: tmpDir,
+      events,
+      index,
+    });
+    const bundle = writeLlmBundle({
+      sessionDir: tmpDir,
+      events,
+      index,
+      candidates,
+    });
+    const numeric = bundle.browserEvidence.failedRequests.find(
+      (entry) => entry.url === "https://api.example.test/numeric",
+    );
+    const string = bundle.browserEvidence.failedRequests.find(
+      (entry) => entry.url === "https://api.example.test/string",
+    );
+    const windows = candidates
+      .map((candidate) =>
+        fs.readFileSync(
+          path.join(tmpDir, "windows", `${candidate.id}.md`),
+          "utf-8",
+        ),
+      )
+      .join("\n");
+
+    expect(numeric).toMatchObject({
+      requestBody: "numeric-body",
+      responseBody: "numeric-response-body",
+    });
+    expect(string).toMatchObject({
+      requestBody: "string-body",
+      responseBody: "string-response-body",
+    });
+    expect(windows).toContain("Request body: numeric-body");
+    expect(windows).toContain("Response body: numeric-response-body");
+    expect(windows).toContain("Request body: string-body");
+    expect(windows).toContain("Response body: string-response-body");
+  });
+
+  it("adds redacted click and input interactions plus an aggregate key count to agent context", () => {
+    const rawInput = "do-not-leak-this-input-value";
+    const selectorValueSecret = "hunter2-selector-secret";
+    const longSelector = `${".checkout-field".repeat(32)}[raw-input-value='${selectorValueSecret}`;
+    expect(longSelector.length).toBeGreaterThan(240);
+    const events: BugEvent[] = [
+      {
+        t: 1_700_000_400_000,
+        k: "clk",
+        offsetMs: 0,
+        d: {
+          el: {
+            sig: "validate-button",
+            path: "button[data-testid='validate']",
+          },
+        },
+      },
+      ...Array.from({ length: 27 }, (_, index) => ({
+        t: 1_700_000_400_010 + index,
+        k: "key",
+        offsetMs: 10 + index,
+        d: { key: "*", code: "KeyA" },
+      })),
+      {
+        t: 1_700_000_400_050,
+        k: "inp",
+        offsetMs: 50,
+        d: {
+          el: {
+            sig: "account-input",
+            path: longSelector,
+          },
+          val: rawInput,
+          ev: "input",
+        },
+      },
+      {
+        t: 1_700_000_400_060,
+        k: "err",
+        offsetMs: 60,
+        d: { msg: "validation failed" },
+      },
+    ];
+    const index = {
+      id: "ses_interactions",
+      start: events[0].t,
+      end: events.at(-1)!.t,
+      dur: 60,
+      evts: events.length,
+      errs: [{ t: events.at(-1)!.t, msg: "validation failed" }],
+      stats: { clk: 1, key: 27, inp: 1, err: 1 },
+    };
+
+    const candidates = writeEvidenceIndex({
+      sessionDir: tmpDir,
+      events,
+      index,
+    });
+    const errorCandidate = candidates.find(
+      (candidate) => candidate.detector === "uncaught_error",
+    );
+    const window = fs.readFileSync(
+      path.join(tmpDir, "windows", `${errorCandidate!.id}.md`),
+      "utf-8",
+    );
+    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
+    const interactivePath = bundle.browserEvidence.interactiveElements.find(
+      (element) => element.sig === "account-input",
+    )?.path;
+
+    expect(bundle.agentContext.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "click",
+          target: "button[data-testid]",
+        }),
+        expect.objectContaining({
+          kind: "input",
+          field: expect.stringContaining(".checkout-field"),
+          summary: expect.stringContaining("value redacted"),
+        }),
+        expect.objectContaining({ kind: "key-count", count: 27 }),
+      ]),
+    );
+    expect(errorCandidate).toBeDefined();
+    expect(bundle.browserEvidence.interactiveElements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sig: "account-input",
+          path: interactivePath,
+        }),
+      ]),
+    );
+    expect(JSON.stringify(bundle.agentContext)).not.toContain(rawInput);
+    expect(JSON.stringify(bundle.agentContext)).not.toContain(
+      selectorValueSecret,
+    );
+    expect(markdown).not.toContain(selectorValueSecret);
+    expect(window).not.toContain(selectorValueSecret);
+    expect(interactivePath).not.toContain(selectorValueSecret);
+  });
+
   it("preserves only minted and W3C correlation ids while redacting token shaped values", () => {
     const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
     const requestId = "req_m9z4x9_abcdefghijkl";
@@ -39,17 +441,35 @@ describe("llm bundle", () => {
       {
         t: 1_700_000_000_001,
         k: "db.diff",
-        d: { engine: "postgres", op: "update", table: "orders", pk: { id: 1 }, requestId: traceId },
+        d: {
+          engine: "postgres",
+          op: "update",
+          table: "orders",
+          pk: { id: 1 },
+          requestId: traceId,
+        },
       },
       {
         t: 1_700_000_000_002,
         k: "db.diff",
-        d: { engine: "postgres", op: "update", table: "orders", pk: { id: 2 }, requestId },
+        d: {
+          engine: "postgres",
+          op: "update",
+          table: "orders",
+          pk: { id: 2 },
+          requestId,
+        },
       },
       ...secrets.map((requestId, index) => ({
         t: 1_700_000_000_003 + index,
         k: "db.diff" as const,
-        d: { engine: "postgres", op: "update", table: "orders", pk: { id: index + 3 }, requestId },
+        d: {
+          engine: "postgres",
+          op: "update",
+          table: "orders",
+          pk: { id: index + 3 },
+          requestId,
+        },
       })),
     ];
     const index: SessionIndexLike = {
@@ -61,7 +481,12 @@ describe("llm bundle", () => {
       stats: { "db.diff": 5 },
       fullStackRequests: {
         schemaVersion: 1,
-        summary: { frontendRequests: 2, backendRequests: 2, linked: 2, gaps: 0 },
+        summary: {
+          frontendRequests: 2,
+          backendRequests: 2,
+          linked: 2,
+          gaps: 0,
+        },
         linked: [
           {
             requestId: traceId,
@@ -72,13 +497,25 @@ describe("llm bundle", () => {
           {
             requestId: secrets[0],
             sessionId: secrets[1],
-            frontend: { requestId: secrets[0], sessionId: secrets[1], method: "POST" },
-            backend: { requestId: secrets[0], sessionId: secrets[1], method: "POST" },
+            frontend: {
+              requestId: secrets[0],
+              sessionId: secrets[1],
+              method: "POST",
+            },
+            backend: {
+              requestId: secrets[0],
+              sessionId: secrets[1],
+              method: "POST",
+            },
           },
         ],
         gaps: [
           { type: "frontend-only", requestId, sessionId },
-          { type: "frontend-only", requestId: secrets[2], sessionId: secrets[0] },
+          {
+            type: "frontend-only",
+            requestId: secrets[2],
+            sessionId: secrets[0],
+          },
         ],
       },
     };
@@ -91,7 +528,10 @@ describe("llm bundle", () => {
       "[REDACTED]",
       "[REDACTED]",
     ]);
-    expect(bundle.fullStackEvidence.linked[0]).toMatchObject({ requestId: traceId, sessionId });
+    expect(bundle.fullStackEvidence.linked[0]).toMatchObject({
+      requestId: traceId,
+      sessionId,
+    });
     const serialized = JSON.stringify(bundle);
     for (const secret of secrets) expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[REDACTED]");

@@ -47,7 +47,7 @@ describe('collectInteractiveElements', () => {
 
     expect(out[0]).toMatchObject({
       sig: '[REDACTED]',
-      path: 'button[data-secret="[REDACTED]"]',
+      path: 'button[data-secret]',
       tag: 'BUTTON',
       txt: 'Pay [REDACTED]',
       count: 1,

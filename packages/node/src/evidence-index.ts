@@ -7,6 +7,7 @@ import {
   type TargetDescriptor,
 } from "crumbtrail-core";
 import { BROWSER_REDACTION_POLICY, normalizeDbEngine } from "./llm-bundle";
+import { redactedNetworkBodySnippet } from "./network-body";
 import { attributeCandidates } from "./causal-graph";
 import type { CausalConfidence, CausalGraph } from "./causal-graph";
 
@@ -45,6 +46,7 @@ export interface EvidenceIndexInput {
       m?: string;
       url?: string;
       st?: number;
+      id?: string | number;
       reason?: string;
       code?: string;
       message?: string;
@@ -53,6 +55,7 @@ export interface EvidenceIndexInput {
     networkErrors?: Array<{
       t: number;
       offsetMs?: number;
+      id?: string | number;
       method?: string;
       m?: string;
       url?: string;
@@ -206,7 +209,6 @@ export function buildEvidenceCandidates(
 ): EvidenceCandidate[] {
   index = withNavigationContext(events, index);
   const requestById = collectRequests(events);
-  const responseByTimeStatus = collectResponsesByTimeStatus(events);
   const responseIds = new Set<string>();
   const drafts: CandidateDraft[] = [];
 
@@ -219,12 +221,8 @@ export function buildEvidenceCandidates(
     // already surface as network_error candidates via index.networkErrors —
     // an "HTTP 0" candidate here would double-count the same failure.
     if (failed.reason === "network_error") continue;
-    const response = findResponseEvent(
-      responseByTimeStatus,
-      failed.t,
-      failed.st,
-    );
-    const reqId = response ? safeText(response.d.id, 120) : undefined;
+    const response = responseForFailedRequest(events, failed);
+    const reqId = requestIdForEvent(response);
     const req = reqId ? requestById.get(reqId) : undefined;
     const detector =
       failed.reason === "application_failure"
@@ -265,6 +263,7 @@ export function buildEvidenceCandidates(
   }
 
   for (const entry of index.networkErrors ?? []) {
+    const requestId = requestIdForValue(entry);
     drafts.push({
       detector: "network_error",
       title: `Network error from ${entry.method || entry.m || "request"} ${redactUrl(entry.url || "")}`,
@@ -275,12 +274,13 @@ export function buildEvidenceCandidates(
         t: entry.t,
         offsetMs: entry.offsetMs ?? offsetFromStart(entry.t, index.start),
         route: routeAt(index.navs ?? [], entry.t),
+        requestId,
         method: entry.method || entry.m,
         url: redactUrl(entry.url),
         message: scrubText(entry.msg, 220),
         source: entry.transport,
       }),
-      dedupeKey: `neterr:${entry.t}:${entry.method ?? entry.m ?? ""}:${entry.url ?? ""}:${entry.msg ?? ""}`,
+      dedupeKey: `neterr:${requestId ?? entry.t}:${entry.method ?? entry.m ?? ""}:${entry.url ?? ""}:${entry.msg ?? ""}`,
     });
   }
 
@@ -1640,6 +1640,18 @@ function renderWindowMarkdown(
         `- ${formatOffset(offsetForEvent(event) ?? offsetFromStart(event.t, index.start), event.t)} ${eventSummary(event)}`,
       );
 
+  const failedRequestBodies = failedRequestBodySnippets(
+    candidate,
+    windowEvents,
+  );
+  if (failedRequestBodies.request || failedRequestBodies.response) {
+    lines.push("", "## Failed request bodies", "");
+    if (failedRequestBodies.request)
+      lines.push(`- Request body: ${failedRequestBodies.request}`);
+    if (failedRequestBodies.response)
+      lines.push(`- Response body: ${failedRequestBodies.response}`);
+  }
+
   lines.push("", "## Console and runtime errors", "");
   const errorEvents = windowEvents.filter(
     (event) =>
@@ -1697,13 +1709,15 @@ function selectCompactTimelineEvents(
       selected.add(entry.index);
   };
   const byProximity = (entries: typeof indexedEvents) =>
-    entries.slice().sort(
-      (a, b) =>
-        Math.abs(a.event.t - candidate.anchor.t) -
-          Math.abs(b.event.t - candidate.anchor.t) ||
-        a.event.t - b.event.t ||
-        a.index - b.index,
-    );
+    entries
+      .slice()
+      .sort(
+        (a, b) =>
+          Math.abs(a.event.t - candidate.anchor.t) -
+            Math.abs(b.event.t - candidate.anchor.t) ||
+          a.event.t - b.event.t ||
+          a.index - b.index,
+      );
   const firstMatching = (
     predicate: (event: BugEvent) => boolean,
   ): { event: BugEvent; index: number } | undefined =>
@@ -1718,21 +1732,20 @@ function selectCompactTimelineEvents(
     ? indexedEvents.find(({ event }) => event === response)
     : undefined;
   const detectorAnchorKind = compactAnchorEventKind(candidate.detector);
-  const anchor =
-    requestId
-      ? responseEntry ??
-        firstMatching(
-          (event) =>
-            event.t === candidate.anchor.t &&
-            requestIdForEvent(event) === requestId,
-        ) ??
-        firstMatching((event) => event.t === candidate.anchor.t)
-      : (detectorAnchorKind
-          ? firstMatching((event) => event.k === detectorAnchorKind)
-          : undefined) ??
-        responseEntry ??
-        firstMatching((event) => event.t === candidate.anchor.t) ??
-        firstMatching(() => true);
+  const anchor = requestId
+    ? (firstMatching(
+        (event) =>
+          event.t === candidate.anchor.t &&
+          requestIdForEvent(event) === requestId,
+      ) ??
+      responseEntry ??
+      firstMatching((event) => event.t === candidate.anchor.t))
+    : ((detectorAnchorKind
+        ? firstMatching((event) => event.k === detectorAnchorKind)
+        : undefined) ??
+      responseEntry ??
+      firstMatching((event) => event.t === candidate.anchor.t) ??
+      firstMatching(() => true));
   add(anchor);
 
   const correlatedRequestId = requestId ?? requestIdForEvent(anchor?.event);
@@ -1740,13 +1753,15 @@ function selectCompactTimelineEvents(
     add(
       firstMatching(
         (event) =>
-          event.k === "net.req" && requestIdForEvent(event) === correlatedRequestId,
+          event.k === "net.req" &&
+          requestIdForEvent(event) === correlatedRequestId,
       ),
     );
     add(
       firstMatching(
         (event) =>
-          event.k === "net.res" && requestIdForEvent(event) === correlatedRequestId,
+          event.k === "net.res" &&
+          requestIdForEvent(event) === correlatedRequestId,
       ),
     );
   }
@@ -1768,8 +1783,10 @@ function selectCompactTimelineEvents(
   addBudgeted(COMPACT_TIMELINE_BUDGETS.interactions, (event) =>
     ["clk", "inp", "key"].includes(event.k),
   );
-  addBudgeted(COMPACT_TIMELINE_BUDGETS.network, (event) =>
-    event.k === "net.req" || event.k === "net.res" || event.k === "net.err",
+  addBudgeted(
+    COMPACT_TIMELINE_BUDGETS.network,
+    (event) =>
+      event.k === "net.req" || event.k === "net.res" || event.k === "net.err",
   );
   addBudgeted(COMPACT_TIMELINE_BUDGETS.lowSignal, isCompactLowSignalEvent);
   addBudgeted(
@@ -1803,13 +1820,90 @@ function compactAnchorEventKind(detector: string): BugEvent["k"] | undefined {
 }
 
 function requestIdForEvent(event: BugEvent | undefined): string | undefined {
-  return event ? safeText(event.d.id, 120) : undefined;
+  if (!event) return undefined;
+  return requestIdForValue(event.d);
+}
+
+function requestIdForValue(value: Record<string, unknown>): string | undefined {
+  const numericId = finiteNumber(value.id);
+  return numericId !== undefined ? String(numericId) : safeText(value.id, 120);
+}
+
+function responseForFailedRequest(
+  events: BugEvent[],
+  failed: NonNullable<EvidenceIndexInput["index"]["failedReqs"]>[number],
+): BugEvent | undefined {
+  const id = requestIdForValue(failed);
+  if (id) {
+    const matches = events.filter(
+      (event) => event.k === "net.res" && requestIdForEvent(event) === id,
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  const matches = events.filter(
+    (event) =>
+      event.k === "net.res" &&
+      requestIdForEvent(event) === undefined &&
+      event.t === failed.t &&
+      finiteNumber(event.d.st) === finiteNumber(failed.st),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function networkAnchorForCandidate(
+  candidate: EvidenceCandidate,
+  windowEvents: BugEvent[],
+): BugEvent | undefined {
+  const id = candidate.anchor.requestId;
+  if (id) {
+    const matches = windowEvents.filter(
+      (event) =>
+        (event.k === "net.res" || event.k === "net.err") &&
+        requestIdForEvent(event) === id,
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  const matches = windowEvents.filter(
+    (event) =>
+      event.t === candidate.anchor.t &&
+      (event.k === "net.res" || event.k === "net.err") &&
+      (candidate.anchor.status === undefined ||
+        event.k !== "net.res" ||
+        event.d.st === candidate.anchor.status),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function failedRequestBodySnippets(
+  candidate: EvidenceCandidate,
+  windowEvents: BugEvent[],
+): { request?: string; response?: string } {
+  const anchor = networkAnchorForCandidate(candidate, windowEvents);
+  if (!anchor) return {};
+
+  const requestId = candidate.anchor.requestId ?? requestIdForEvent(anchor);
+  const request = requestId
+    ? windowEvents.find(
+        (event) =>
+          event.k === "net.req" && requestIdForEvent(event) === requestId,
+      )
+    : undefined;
+
+  return removeUndefined({
+    request: request
+      ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+      : undefined,
+    response:
+      anchor.k === "net.res"
+        ? redactedNetworkBodySnippet(anchor.d.body, anchor.d.bodySummary)
+        : undefined,
+  });
 }
 
 function isCompactErrorEvent(event: BugEvent): boolean {
-  return ["con", "err", "rej", "probe.error", "native-crash"].includes(
-    event.k,
-  );
+  return ["con", "err", "rej", "probe.error", "native-crash"].includes(event.k);
 }
 
 function isCompactLowSignalEvent(event: BugEvent): boolean {
@@ -2094,9 +2188,16 @@ function countBy(values: string[]): Record<string, number> {
 }
 
 function truncate(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
   return value.length <= maxLength
     ? value
-    : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+    : `${value.slice(0, truncateEnd(value, maxLength - 1))}…`;
+}
+
+function truncateEnd(value: string, maxLength: number): number {
+  const end = Math.max(0, maxLength);
+  const lastCodeUnit = value.charCodeAt(end - 1);
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff ? end - 1 : end;
 }
 
 function removeUndefined<T extends Record<string, unknown>>(value: T): T {

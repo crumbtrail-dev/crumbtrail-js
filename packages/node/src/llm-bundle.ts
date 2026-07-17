@@ -13,7 +13,9 @@ import {
   collectInteractiveElements,
   type InteractiveElement,
 } from "./interactive-elements";
+import { sanitizeSelector } from "./sanitize-selector";
 import { groupDistinctBugs, type DistinctBug } from "./distinct-bugs";
+import { redactedNetworkBodySnippet } from "./network-body";
 import type { EvidenceCandidate } from "./evidence-index";
 import type { CausalConfidence } from "./causal-graph";
 
@@ -35,6 +37,7 @@ export interface SessionIndexLike {
     m: string;
     url: string;
     st: number;
+    id?: string | number;
     reason?: string;
     code?: string;
     message?: string;
@@ -42,6 +45,7 @@ export interface SessionIndexLike {
   }>;
   networkErrors?: Array<{
     t: number;
+    id?: string | number;
     m?: string;
     method?: string;
     url?: string;
@@ -227,6 +231,10 @@ export interface LlmBundleFailedRequestSummary {
   code?: string;
   message?: string;
   phase?: string;
+  /** Bounded, redacted request payload evidence when it was captured. */
+  requestBody?: string;
+  /** Bounded, redacted response payload evidence when it was captured. */
+  responseBody?: string;
   /** Number of same-signature entries this exemplar represents. Present only when >= 2. */
   count?: number;
   /** Earliest `t` across the compacted same-signature run. Present only when `count` is. */
@@ -243,6 +251,8 @@ export interface LlmBundleNetworkErrorSummary {
   url?: string;
   message?: string;
   transport?: string;
+  /** Bounded, redacted request payload evidence when it was captured. */
+  requestBody?: string;
   /** Number of same-signature entries this exemplar represents. Present only when >= 2. */
   count?: number;
   /** Earliest `t` across the compacted same-signature run. Present only when `count` is. */
@@ -330,6 +340,28 @@ export interface LlmBundleBrowserEvidence {
   consoleErrors: LlmBundleConsoleErrorSummary[];
   tabBoundaries: LlmBundleTabBoundarySummary;
   interactiveElements: InteractiveElement[];
+}
+
+export const AGENT_CONTEXT_SCHEMA_VERSION =
+  "crumbtrail.agent_context.v1" as const;
+
+export interface LlmBundleAgentContextTimelineEntry {
+  t: number;
+  iso?: string;
+  offsetMs?: number;
+  kind:
+    "navigation" | "error" | "failed-request" | "click" | "input" | "key-count";
+  summary: string;
+  target?: string;
+  field?: string;
+  count?: number;
+  requestBody?: string;
+  responseBody?: string;
+}
+
+export interface LlmBundleAgentContext {
+  schemaVersion: typeof AGENT_CONTEXT_SCHEMA_VERSION;
+  timeline: LlmBundleAgentContextTimelineEntry[];
 }
 
 /**
@@ -429,6 +461,8 @@ export interface LlmBundle {
   artifacts: LlmBundleArtifact[];
   eventCounts: Record<string, number>;
   keyTimelineMoments: LlmBundleTimelineMoment[];
+  /** Compact, action-oriented context for coding agents. */
+  agentContext: LlmBundleAgentContext;
   browserEvidence: LlmBundleBrowserEvidence;
   fullStackEvidence: LlmBundleFullStackEvidence;
   /**
@@ -758,6 +792,7 @@ export function buildLlmBundle({
     artifacts,
     eventCounts: stableStats(index.stats, events),
     keyTimelineMoments: buildKeyTimelineMoments(events, index, session.startMs),
+    agentContext: buildAgentContext(events, index, session.startMs),
     browserEvidence,
     fullStackEvidence,
     distinctBugs: applyFlagNoteTitles(
@@ -1118,6 +1153,169 @@ function buildKeyTimelineMoments(
   return moments.sort((a, b) => a.t - b.t).slice(0, 40);
 }
 
+const AGENT_CONTEXT_MAX_TIMELINE_ENTRIES = 80;
+const AGENT_CONTEXT_MAX_INTERACTION_ENTRIES = 40;
+
+function buildAgentContext(
+  events: BugEvent[],
+  index: SessionIndexLike,
+  sessionStartMs: number,
+): LlmBundleAgentContext {
+  const timeline: LlmBundleAgentContextTimelineEntry[] = [];
+  let keyCount = 0;
+  let lastKeyEvent: BugEvent | undefined;
+
+  for (const event of events) {
+    if (event.k === "key") {
+      keyCount += 1;
+      lastKeyEvent = event;
+      continue;
+    }
+
+    const base = {
+      t: event.t,
+      iso: iso(event.t),
+      offsetMs:
+        finiteNumber(event.offsetMs) ??
+        offsetFromStart(event.t, sessionStartMs),
+    };
+
+    if (event.k === "nav") {
+      timeline.push(
+        removeUndefined({
+          ...base,
+          kind: "navigation" as const,
+          summary: summarizeEvent(event, index) ?? "navigation captured",
+        }),
+      );
+      continue;
+    }
+
+    if (event.k === "clk") {
+      const target = interactionIdentifier(event);
+      timeline.push(
+        removeUndefined({
+          ...base,
+          kind: "click" as const,
+          target,
+          summary: target ? `click ${target}` : "click captured",
+        }),
+      );
+      continue;
+    }
+
+    if (event.k === "inp") {
+      const field = interactionIdentifier(event);
+      timeline.push(
+        removeUndefined({
+          ...base,
+          kind: "input" as const,
+          field,
+          summary: field
+            ? `input ${field}; value redacted`
+            : "input captured; value redacted",
+        }),
+      );
+      continue;
+    }
+
+    if (event.k === "net.res" && isFailedNetworkResponse(event)) {
+      const request = requestForNetworkEvent(events, event);
+      timeline.push(
+        removeUndefined({
+          ...base,
+          kind: "failed-request" as const,
+          summary: summarizeEvent(event, index) ?? "failed request",
+          requestBody: request
+            ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+            : undefined,
+          responseBody: redactedNetworkBodySnippet(
+            event.d.body,
+            event.d.bodySummary,
+          ),
+        }),
+      );
+      continue;
+    }
+
+    if (event.k === "net.err") {
+      const request = requestForNetworkEvent(events, event);
+      timeline.push(
+        removeUndefined({
+          ...base,
+          kind: "failed-request" as const,
+          summary: summarizeEvent(event, index) ?? "network request error",
+          requestBody: request
+            ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+            : undefined,
+        }),
+      );
+      continue;
+    }
+
+    if (isAgentContextError(event)) {
+      const summary = summarizeEvent(event, index);
+      if (summary) timeline.push({ ...base, kind: "error", summary });
+    }
+  }
+
+  if (lastKeyEvent) {
+    timeline.push(
+      removeUndefined({
+        t: lastKeyEvent.t,
+        iso: iso(lastKeyEvent.t),
+        offsetMs:
+          finiteNumber(lastKeyEvent.offsetMs) ??
+          offsetFromStart(lastKeyEvent.t, sessionStartMs),
+        kind: "key-count" as const,
+        count: keyCount,
+        summary: `${keyCount} keystroke${keyCount === 1 ? "" : "s"} captured; values redacted`,
+      }),
+    );
+  }
+
+  return {
+    schemaVersion: AGENT_CONTEXT_SCHEMA_VERSION,
+    timeline: boundAgentContextTimeline(timeline),
+  };
+}
+
+function isAgentContextError(event: BugEvent): boolean {
+  if (event.k === "err" || event.k === "rej" || event.k === "probe.error")
+    return true;
+  return (
+    event.k === "con" &&
+    ["err", "error"].includes(consoleLevel(event.d.lv) ?? "")
+  );
+}
+
+function interactionIdentifier(event: BugEvent): string | undefined {
+  if (!isRecord(event.d.el)) return undefined;
+  const element = event.d.el;
+  const selector =
+    sanitizeSelector(element.path) ??
+    sanitizeSelector(element.selector) ??
+    sanitizeSelector(element.sig) ??
+    sanitizeSelector(element.name, 120) ??
+    sanitizeSelector(element.id, 120);
+  return selector ? safeText(selector, 240) : undefined;
+}
+
+function boundAgentContextTimeline(
+  timeline: LlmBundleAgentContextTimelineEntry[],
+): LlmBundleAgentContextTimelineEntry[] {
+  if (timeline.length <= AGENT_CONTEXT_MAX_TIMELINE_ENTRIES)
+    return timeline.sort((a, b) => a.t - b.t);
+
+  const interactions = timeline
+    .filter((entry) => ["click", "input", "key-count"].includes(entry.kind))
+    .slice(-AGENT_CONTEXT_MAX_INTERACTION_ENTRIES);
+  const nonInteractions = timeline
+    .filter((entry) => !["click", "input", "key-count"].includes(entry.kind))
+    .slice(-(AGENT_CONTEXT_MAX_TIMELINE_ENTRIES - interactions.length));
+  return [...nonInteractions, ...interactions].sort((a, b) => a.t - b.t);
+}
+
 function summarizeEvent(
   event: BugEvent,
   index: SessionIndexLike,
@@ -1319,7 +1517,7 @@ function buildBrowserEvidence(
 ): LlmBundleBrowserEvidence {
   return {
     pageProbe: buildPageProbeSummary(index, events, sessionStartMs),
-    failedRequests: buildFailedRequestSummaries(index, sessionStartMs),
+    failedRequests: buildFailedRequestSummaries(index, events, sessionStartMs),
     networkErrors: buildNetworkErrorSummaries(index, events, sessionStartMs),
     consoleErrors: buildConsoleErrorSummaries(index, events, sessionStartMs),
     tabBoundaries: buildTabBoundarySummary(index, events, sessionStartMs),
@@ -1710,6 +1908,8 @@ function failedRequestSignature(entry: LlmBundleFailedRequestSummary): string {
     entry.status !== undefined ? String(entry.status) : "",
     entry.reason ?? "",
     entry.code ?? "",
+    normalizeSummarySignature(entry.requestBody),
+    normalizeSummarySignature(entry.responseBody),
   ].join(SIGNATURE_SEPARATOR);
 }
 
@@ -1719,6 +1919,7 @@ function networkErrorSignature(entry: LlmBundleNetworkErrorSummary): string {
     normalizeSummarySignature(entry.url),
     normalizeSummarySignature(entry.message),
     entry.transport ?? "",
+    normalizeSummarySignature(entry.requestBody),
   ].join(SIGNATURE_SEPARATOR);
 }
 
@@ -1732,11 +1933,12 @@ function consoleErrorSignature(entry: LlmBundleConsoleErrorSummary): string {
 
 function buildFailedRequestSummaries(
   index: SessionIndexLike,
+  events: BugEvent[],
   sessionStartMs: number,
 ): LlmBundleFailedRequestSummary[] {
   return selectSummaries({
     indexEntries: index.failedReqs,
-    fromIndex: (req) => failedRequestFromIndex(req, sessionStartMs),
+    fromIndex: (req) => failedRequestFromIndex(req, events, sessionStartMs),
     excludeUntrusted: true,
     cap: 40,
     signatureOf: failedRequestSignature,
@@ -1745,11 +1947,20 @@ function buildFailedRequestSummaries(
 
 function failedRequestFromIndex(
   value: unknown,
+  events: BugEvent[],
   sessionStartMs: number,
 ): LlmBundleFailedRequestSummary | undefined {
   if (!isRecord(value)) return undefined;
   const t = finiteNumber(value.t);
   if (t === undefined) return undefined;
+
+  const networkEvent =
+    safeText(value.reason, 80) === "network_error"
+      ? networkErrorForIndex(events, value, t)
+      : responseForFailedRequest(events, value, t);
+  const request = networkEvent
+    ? requestForNetworkEvent(events, networkEvent)
+    : undefined;
 
   return removeUndefined({
     t,
@@ -1763,7 +1974,59 @@ function failedRequestFromIndex(
     code: safeText(value.code, 120),
     message: safeText(value.message, 160),
     phase: safeText(value.phase, 120),
+    requestBody: request
+      ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+      : undefined,
+    responseBody: networkEvent?.k === "net.res"
+      ? redactedNetworkBodySnippet(
+          networkEvent.d.body,
+          networkEvent.d.bodySummary,
+        )
+      : undefined,
   });
+}
+
+function requestForNetworkEvent(
+  events: BugEvent[],
+  event: BugEvent,
+): BugEvent | undefined {
+  const id = requestIdForEvent(event);
+  if (!id) return undefined;
+  return events.find(
+    (candidate) =>
+      candidate.k === "net.req" && requestIdForEvent(candidate) === id,
+  );
+}
+
+function responseForFailedRequest(
+  events: BugEvent[],
+  value: Record<string, unknown>,
+  t: number,
+): BugEvent | undefined {
+  const id = requestIdForValue(value);
+  if (id) {
+    const matches = events.filter(
+      (event) => event.k === "net.res" && requestIdForEvent(event) === id,
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  const matches = events.filter(
+    (event) =>
+      event.k === "net.res" &&
+      event.t === t &&
+      finiteNumber(event.d.st) === finiteNumber(value.st),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function requestIdForEvent(event: BugEvent | undefined): string | undefined {
+  return event ? requestIdForValue(event.d) : undefined;
+}
+
+function requestIdForValue(value: Record<string, unknown>): string | undefined {
+  const numericId = finiteNumber(value.id);
+  return numericId !== undefined ? String(numericId) : safeText(value.id, 120);
 }
 
 function summarizeApplicationFailure(event: BugEvent):
@@ -1855,10 +2118,10 @@ function buildNetworkErrorSummaries(
 ): LlmBundleNetworkErrorSummary[] {
   return selectSummaries({
     indexEntries: index.networkErrors,
-    fromIndex: (entry) => networkErrorFromIndex(entry, sessionStartMs),
+    fromIndex: (entry) => networkErrorFromIndex(entry, events, sessionStartMs),
     events,
     eventKind: "net.err",
-    fromEvent: (event) => networkErrorFromEvent(event, sessionStartMs),
+    fromEvent: (event) => networkErrorFromEvent(event, events, sessionStartMs),
     excludeUntrusted: true,
     cap: 40,
     signatureOf: networkErrorSignature,
@@ -1867,11 +2130,17 @@ function buildNetworkErrorSummaries(
 
 function networkErrorFromIndex(
   value: unknown,
+  events: BugEvent[],
   sessionStartMs: number,
 ): LlmBundleNetworkErrorSummary | undefined {
   if (!isRecord(value)) return undefined;
   const t = finiteNumber(value.t);
   if (t === undefined) return undefined;
+
+  const networkError = networkErrorForIndex(events, value, t);
+  const request = networkError
+    ? requestForNetworkEvent(events, networkError)
+    : undefined;
 
   return removeUndefined({
     t,
@@ -1882,14 +2151,33 @@ function networkErrorFromIndex(
     url: safeUrl(value.url, "index.networkErrors.url"),
     message: safeText(value.msg, 180),
     transport: safeText(value.transport, 40),
+    requestBody: request
+      ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+      : undefined,
   });
+}
+
+function networkErrorForIndex(
+  events: BugEvent[],
+  value: Record<string, unknown>,
+  t: number,
+): BugEvent | undefined {
+  const id = requestIdForValue(value);
+  const matches = events.filter(
+    (event) =>
+      event.k === "net.err" &&
+      (id ? requestIdForEvent(event) === id : event.t === t),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function networkErrorFromEvent(
   event: BugEvent,
+  events: BugEvent[],
   sessionStartMs: number,
 ): LlmBundleNetworkErrorSummary | undefined {
   if (event.k !== "net.err") return undefined;
+  const request = requestForNetworkEvent(events, event);
   return removeUndefined({
     t: event.t,
     iso: iso(event.t),
@@ -1899,6 +2187,9 @@ function networkErrorFromEvent(
     url: safeUrl(event.d.url, "event.net.err.url"),
     message: safeText(event.d.msg, 180),
     transport: safeText(event.d.transport, 40),
+    requestBody: request
+      ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+      : undefined,
   });
 }
 
@@ -3152,7 +3443,16 @@ export function renderLlmMarkdown(bundle: LlmBundle): string {
           "### Failed Requests",
           "",
           table(
-            ["Offset", "Method", "Status", "Reason", "Code", "URL"],
+            [
+              "Offset",
+              "Method",
+              "Status",
+              "Reason",
+              "Code",
+              "URL",
+              "Request body",
+              "Response body",
+            ],
             bundle.browserEvidence.failedRequests
               .slice(0, 10)
               .map((req) => [
@@ -3162,17 +3462,43 @@ export function renderLlmMarkdown(bundle: LlmBundle): string {
                 req.reason ?? "",
                 req.code ?? req.message ?? "",
                 req.url ?? "",
+                req.requestBody ?? "",
+                req.responseBody ?? "",
               ]),
           ),
           "",
         ]
       : []),
+    "## Agent Context Timeline",
+    "",
+    `- Schema: ${bundle.agentContext.schemaVersion}`,
+    ...(bundle.agentContext.timeline.length > 0
+      ? [
+          "",
+          table(
+            ["Offset", "Kind", "Summary"],
+            bundle.agentContext.timeline
+              .slice(0, 40)
+              .map((entry) => [
+                entry.offsetMs !== undefined
+                  ? `${entry.offsetMs} ms`
+                  : "unknown",
+                entry.kind,
+                entry.summary,
+              ]),
+          ),
+        ]
+      : [
+          "",
+          "_No navigation, error, failed request, or interaction events captured._",
+        ]),
+    "",
     ...(bundle.browserEvidence.networkErrors.length > 0
       ? [
           "### Network Errors",
           "",
           table(
-            ["Offset", "Method", "Transport", "URL", "Message"],
+            ["Offset", "Method", "Transport", "URL", "Message", "Request body"],
             bundle.browserEvidence.networkErrors
               .slice(0, 10)
               .map((entry) => [
@@ -3183,6 +3509,7 @@ export function renderLlmMarkdown(bundle: LlmBundle): string {
                 entry.transport ?? "",
                 entry.url ?? "",
                 entry.message ?? "",
+                entry.requestBody ?? "",
               ]),
           ),
           "",
@@ -3726,9 +4053,16 @@ function iso(value: number): string | undefined {
 }
 
 function truncate(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
   return value.length <= maxLength
     ? value
-    : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+    : `${value.slice(0, truncateEnd(value, maxLength - 1))}…`;
+}
+
+function truncateEnd(value: string, maxLength: number): number {
+  const end = Math.max(0, maxLength);
+  const lastCodeUnit = value.charCodeAt(end - 1);
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff ? end - 1 : end;
 }
 
 function joinParts(parts: Array<string | undefined>): string {

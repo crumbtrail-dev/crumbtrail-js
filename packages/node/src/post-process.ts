@@ -81,6 +81,7 @@ interface ConsoleErrorIndexEntry {
 interface NetworkErrorIndexEntry {
   t: number;
   offsetMs?: number;
+  id?: string | number;
   m?: string;
   method?: string;
   url?: string;
@@ -229,6 +230,7 @@ interface SessionIndex {
     m: string;
     url: string;
     st: number;
+    id?: string | number;
     reason?: string;
     code?: string;
     message?: string;
@@ -349,6 +351,9 @@ export async function postProcess(
         m: req?.m || "",
         url: req?.url || "",
         st: typeof event.d.st === "number" ? event.d.st : 0,
+        ...(typeof event.d.id === "string" || typeof event.d.id === "number"
+          ? { id: event.d.id }
+          : {}),
         ...(applicationFailure ?? { reason: "http_status" }),
       });
     }
@@ -371,6 +376,9 @@ export async function postProcess(
           m: method,
           url,
           st: 0,
+          ...(typeof event.d.id === "string" || typeof event.d.id === "number"
+            ? { id: event.d.id }
+            : {}),
           reason: "network_error",
           ...(message !== undefined ? { message } : {}),
         });
@@ -677,6 +685,9 @@ function summarizeNetworkErrorEvent(
     t: event.t,
     offsetMs:
       nonNegativeNumber(event.offsetMs) ?? nonNegativeNumber(event.d.offsetMs),
+    ...(typeof event.d.id === "string" || typeof event.d.id === "number"
+      ? { id: event.d.id }
+      : {}),
     m: safeString(event.d.m),
     method: safeString(event.d.method),
     url: safeUrl(event.d.url),

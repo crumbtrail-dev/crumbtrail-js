@@ -1,4 +1,5 @@
 import { redactTokenLikeString, redactUrl } from "crumbtrail-core";
+import { sanitizeSelector } from "./sanitize-selector";
 
 export interface InteractiveElement {
   sig: string;
@@ -30,10 +31,13 @@ function safeIdentifier(value: unknown): string | undefined {
 function safePath(value: unknown): string {
   const text = asString(value)?.trim();
   if (!text) return "";
-  const redacted = looksUrlLike(text)
-    ? redactUrl(text, "interactiveElement.path").value
-    : redactTokenLikeString(text, "interactiveElement.path").value;
-  return redacted.slice(0, 240);
+  if (looksUrlLike(text))
+    return redactUrl(text, "interactiveElement.path").value.slice(0, 240);
+
+  const selector = sanitizeSelector(text);
+  return selector
+    ? redactTokenLikeString(selector, "interactiveElement.path").value
+    : "";
 }
 
 function looksUrlLike(value: string): boolean {

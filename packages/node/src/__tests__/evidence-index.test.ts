@@ -432,7 +432,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(compactTimeline).toContain(
       "7598 ms net.res: response send-file status 500 dur 421 ms",
     );
-    expect(compactEventLines.length).toBeLessThanOrEqual(120);
+    expect(compactEventLines).toHaveLength(120);
     expect(lowSignalLines.length).toBeGreaterThan(18);
   });
 
@@ -591,5 +591,47 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(candidates).toHaveLength(1);
     expect(timeline).toContain("net.res");
     expect(search).toContain("response status unknown");
+  });
+
+  it("omits failed-request body snippets when id-less same-ms responses are ambiguous", () => {
+    const responseTime = 14_000;
+    const events: BugEvent[] = [
+      {
+        t: responseTime,
+        k: "net.res",
+        d: { st: 500, body: "unrelated-response-one" },
+      },
+      {
+        t: responseTime,
+        k: "net.res",
+        d: { st: 500, body: "unrelated-response-two" },
+      },
+    ];
+    const candidates = writeEvidenceIndex({
+      sessionDir: tmpDir,
+      events,
+      index: {
+        id: "ses_ambiguous_idless_bodies",
+        start: responseTime,
+        end: responseTime,
+        dur: 0,
+        failedReqs: [
+          {
+            t: responseTime,
+            m: "POST",
+            url: "https://api.example.test/fail",
+            st: 500,
+          },
+        ],
+      },
+    });
+    const window = fs.readFileSync(
+      path.join(tmpDir, "windows", `${candidates[0].id}.md`),
+      "utf-8",
+    );
+
+    expect(window).not.toContain("## Failed request bodies");
+    expect(window).not.toContain("unrelated-response-one");
+    expect(window).not.toContain("unrelated-response-two");
   });
 });
