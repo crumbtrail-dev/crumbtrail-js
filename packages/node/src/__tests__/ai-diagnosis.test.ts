@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import {
   backfillAiDiagnoses,
+  normalizeAiOpinion,
   runAiDiagnosis,
   scheduleAiDiagnosis,
 } from "../ai-diagnosis";
@@ -606,3 +607,18 @@ function evidenceBundleFromPrompt(
   if (start < 0) throw new Error("provider prompt is missing the evidence bundle");
   return JSON.parse(prompt.slice(start + marker.length));
 }
+
+describe("normalizeAiOpinion code_refs", () => {
+  it("keeps valid code_refs, normalizes to strings, omits when absent or empty", () => {
+    const opinion = normalizeAiOpinion({
+      findings: [
+        { confidence: "high", evidence_refs: ["e1"], code_refs: ["src/a.ts:10", 7] },
+        { confidence: "low", evidence_refs: [] },
+        { confidence: "low", evidence_refs: [], code_refs: [7] },
+      ],
+    });
+    expect(opinion.hypotheses[0].code_refs).toEqual(["src/a.ts:10"]);
+    expect("code_refs" in opinion.hypotheses[1]).toBe(false);
+    expect("code_refs" in opinion.hypotheses[2]).toBe(false);
+  });
+});

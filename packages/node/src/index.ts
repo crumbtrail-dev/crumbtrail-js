@@ -73,6 +73,8 @@ export type {
   FixContextDbRead,
   BuildFixContextOptions,
 } from "./fix-context";
+export { extractOpinionCodePointers } from "./code-pointers";
+export type { CodePointer, CodePointerResolution } from "./code-pointers";
 export {
   buildDbDiffEvent,
   buildDbReadBulkEvent,

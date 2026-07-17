@@ -152,6 +152,39 @@ describe("buildFixContext", () => {
     });
   });
 
+  it("omits code_pointers when no opinion artifact exists", () => {
+    const fc = buildFixContext(sessionDir);
+    expect("code_pointers" in fc).toBe(false);
+  });
+
+  it("surfaces cloud-resolved code pointers from the opinion artifact", () => {
+    const pointer = {
+      repo: "acme/shop",
+      path: "src/checkout.ts",
+      line: 42,
+      commitSha: "a".repeat(40),
+      permalink: `https://github.com/acme/shop/blob/${"a".repeat(40)}/src/checkout.ts#L42`,
+      resolution: "deploy",
+    };
+    fs.writeFileSync(
+      path.join(sessionDir, "opinion.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        findings: [],
+        canonicalResults: [
+          {
+            issueKey: "issue-1",
+            findings: [],
+            analysis: {},
+            codePointers: [pointer, { repo: "acme/shop" }],
+          },
+        ],
+      }),
+    );
+    const fc = buildFixContext(sessionDir);
+    expect(fc.code_pointers).toEqual([pointer]);
+  });
+
   it("defaults db_diffs/db_reads to [] and environment to null", () => {
     const fc = buildFixContext(sessionDir);
     expect(fc.primary_window.db_diffs).toEqual([]);

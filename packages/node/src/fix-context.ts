@@ -12,6 +12,10 @@ import type {
   LlmBundleFrontendRequestEvidenceSummary,
   LlmBundleLinkedFullStackRequestSummary,
 } from "./llm-bundle";
+import {
+  extractOpinionCodePointers,
+  type CodePointer,
+} from "./code-pointers";
 
 /** A database row diff correlated to the primary window. See {@link LlmBundleDbDiff}. */
 export type FixContextDbDiff = LlmBundleDbDiff;
@@ -129,6 +133,14 @@ export interface FixContext {
    */
   causal_chain: FixContextCausalChain | null;
   repro_hint: FixContextReproHint | null;
+  /**
+   * Cloud-resolved GitHub code pointers projected from the session's canonical
+   * opinion artifact (cloud GitHub integration, CP3). OPTIONAL and additive:
+   * absent when the session has no opinion artifact, the deployment has no
+   * GitHub connection, or resolution produced no honest match. Consumers MUST
+   * treat absence as "no pointers available", never as an error.
+   */
+  code_pointers?: CodePointer[];
 }
 
 export interface BuildFixContextOptions {
@@ -165,8 +177,11 @@ export function buildFixContext(
   const index = readJsonRecord(sessionDir, "index.json") ?? {};
   const bundle = readBundle(sessionDir);
   const ranked = readCandidates(sessionDir);
+  const opinion = readJsonRecord(sessionDir, "opinion.json");
 
-  return buildFixContextFromArtifacts(sessionDir, index, bundle, ranked);
+  return buildFixContextFromArtifacts(sessionDir, index, bundle, ranked, {
+    opinion,
+  });
 }
 
 /**
@@ -179,12 +194,14 @@ export function buildFixContextFromArtifacts(
   index: Record<string, unknown>,
   bundle: LlmBundle | undefined,
   ranked: EvidenceCandidate[],
+  extras: { opinion?: Record<string, unknown> } = {},
 ): FixContext {
   const session = buildSession(sessionDir, index, bundle);
   const primaryWindow = buildPrimaryWindow(ranked, bundle);
   const reproHint = buildReproHint(ranked);
   const environment = buildEnvironment(bundle);
   const causalChain = buildCausalChain(ranked);
+  const codePointers = extractOpinionCodePointers(extras.opinion);
 
   return {
     schemaVersion: FIX_CONTEXT_SCHEMA_VERSION,
@@ -194,6 +211,7 @@ export function buildFixContextFromArtifacts(
     environment,
     causal_chain: causalChain,
     repro_hint: reproHint,
+    ...(codePointers ? { code_pointers: codePointers } : {}),
   };
 }
 

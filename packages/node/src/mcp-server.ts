@@ -238,7 +238,7 @@ const TOOLS = [
   {
     name: "getFixContext",
     description:
-      "Give a coding agent complete bug context for one recorded session. Returns the fix-context.v2 bundle: deterministic signals with heuristic bases, the primary evidence window with correlated frontend requests, backend spans, and the exact database rows that changed, plus a redaction aware environment snapshot, causal chain, and repro hint. Start here when the user asks you to fix a bug captured with Crumbtrail.",
+      "Give a coding agent complete bug context for one recorded session. Returns the fix-context.v2 bundle: deterministic signals with heuristic bases, the primary evidence window with correlated frontend requests, backend spans, and the exact database rows that changed, plus a redaction aware environment snapshot, causal chain, and repro hint. When cloud analysis resolved GitHub code pointers for the session, the bundle also carries code_pointers (repo, path, line, permalink pinned to a deploy or head commit). Start here when the user asks you to fix a bug captured with Crumbtrail.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -252,7 +252,7 @@ const TOOLS = [
   {
     name: "getOpinion",
     description:
-      "Get the optional LLM produced opinion for one session. Returns ranked hypotheses with confidence, evidence references, and explicit unknowns. It does not alter the neutral evidence bundle.",
+      "Get the optional LLM produced opinion for one session. Returns ranked hypotheses with confidence, evidence references, and explicit unknowns; cloud code grounded findings may add code_refs (path:line pointers) and resolved GitHub code pointers. It does not alter the neutral evidence bundle.",
     inputSchema: {
       type: "object" as const,
       properties: { sessionId: { type: "string" } },
@@ -263,7 +263,7 @@ const TOOLS = [
   {
     name: "getLatestIssue",
     description:
-      "The one call entry point: finds the most recent finalized session with error class evidence and returns its complete fix-context.v2 bundle with deterministic signals, the correlated primary window, environment snapshot, causal chain, and repro hint. Call it with no arguments when the user asks to fix the latest bug. Optional maxTokens bounds the response using a conservative character estimate.",
+      "The one call entry point: finds the most recent finalized session with error class evidence and returns its complete fix-context.v2 bundle with deterministic signals, the correlated primary window, environment snapshot, causal chain, repro hint, and, when cloud analysis resolved them, GitHub code_pointers. Call it with no arguments when the user asks to fix the latest bug. Optional maxTokens bounds the response using a conservative character estimate.",
     inputSchema: {
       type: "object" as const,
       properties: { maxTokens: { ...MAX_TOKENS_SCHEMA } },
@@ -1500,6 +1500,11 @@ export class McpServer {
       const bundle =
         (await this.readJsonRecordAsync(dir, "llm.json")) ??
         (await this.readJsonRecordAsync(dir, "bundle.json"));
+      // The opinion artifact is optional context: when the cloud wrote one it
+      // can carry resolved code pointers (GitHub integration CP3) that the
+      // fix-context builder surfaces as `code_pointers`. A missing artifact
+      // simply omits the field.
+      const opinion = await this.readJsonRecordAsync(dir, "opinion.json");
       const context = buildFixContextFromArtifacts(
         dir,
         index,
@@ -1507,6 +1512,7 @@ export class McpServer {
         (await this.readCandidatesJsonlAsync(
           dir,
         )) as unknown as EvidenceCandidate[],
+        { opinion: opinion ?? undefined },
       );
       return this.fixContextResult(context, budget.maxTokens);
     } catch (err) {

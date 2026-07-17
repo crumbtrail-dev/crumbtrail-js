@@ -56,6 +56,12 @@ export interface AiOpinionHypothesis extends Record<string, unknown> {
   rank: number;
   confidence: string;
   evidence_refs: string[];
+  /**
+   * Cloud code-grounded findings may carry `path:line` pointers into the
+   * project's mapped repositories (cloud GitHub integration, CP5). Optional
+   * and additive: absent for local opinions and for projects without code AI.
+   */
+  code_refs?: string[];
 }
 
 export interface AiOpinionArtifact {
@@ -672,12 +678,18 @@ export function normalizeAiOpinion(value: unknown): AiOpinionArtifact {
       : [];
   const hypotheses = rawHypotheses.map((entry, index) => {
     const record = isRecord(entry) ? entry : {};
+    const codeRefs = stringValues(record.code_refs);
+    const { code_refs: _rawCodeRefs, ...rest } = record;
     return {
-      ...record,
+      ...rest,
       rank: typeof record.rank === "number" ? record.rank : index + 1,
       confidence:
         typeof record.confidence === "string" ? record.confidence : "unknown",
       evidence_refs: stringValues(record.evidence_refs),
+      // Normalized like evidence_refs, but omitted (not []) when the source
+      // finding carried none, so readers never mistake "no code AI" for
+      // "code AI ran and matched nothing".
+      ...(codeRefs.length > 0 ? { code_refs: codeRefs } : {}),
     } as AiOpinionHypothesis;
   });
   const unknowns = stringValues(source.unknowns);
