@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { BugEvent } from "crumbtrail-core";
 import {
   buildDistinctBugSignature,
   groupDistinctBugs,
@@ -148,6 +149,75 @@ describe("groupDistinctBugs", () => {
     expect(groupDistinctBugs([])).toEqual([]);
   });
 
+  it("carries bounded, redacted bodies for the representative's correlated failed request", () => {
+    const representative = candidate({
+      id: "cand_body",
+      detector: "http_error",
+      title: "HTTP 500 from POST /api/pay",
+      severity: "high",
+      score: 90,
+      anchor: {
+        t: 1_100,
+        requestId: "body-request",
+        method: "POST",
+        status: 500,
+      },
+    });
+    const events: BugEvent[] = [
+      {
+        t: 1_000,
+        k: "net.req",
+        d: { id: "body-request", body: "apiKey=supersecret-key&amount=42" },
+      },
+      {
+        t: 1_100,
+        k: "net.res",
+        d: {
+          id: "body-request",
+          st: 500,
+          body: { error: "payment failed", token: "supersecret-token" },
+        },
+      },
+    ];
+
+    const [bug] = groupDistinctBugs([representative], events);
+
+    expect(bug.representative.bodySnippet).toMatchObject({
+      request: expect.stringContaining("[REDACTED_KEY]="),
+      response: expect.stringContaining("[REDACTED_KEY]"),
+    });
+    expect(bug.representative.bodySnippet?.request).toContain("amount=42");
+    expect(bug.representative.bodySnippet?.response).toContain("payment failed");
+    expect(JSON.stringify(bug.representative.bodySnippet)).not.toContain(
+      "supersecret",
+    );
+    expect(bug.representative.bodySnippet?.request?.length).toBeLessThanOrEqual(
+      300,
+    );
+    expect(bug.representative.bodySnippet?.response?.length).toBeLessThanOrEqual(
+      300,
+    );
+  });
+
+  it("omits the representative body snippet when the failed request has no bodies", () => {
+    const representative = candidate({
+      id: "cand_body_absent",
+      detector: "network_error",
+      title: "Network error from POST /api/pay",
+      severity: "high",
+      score: 86,
+      anchor: { t: 1_100, requestId: "bodyless-request", method: "POST" },
+    });
+    const events: BugEvent[] = [
+      { t: 1_000, k: "net.req", d: { id: "bodyless-request" } },
+      { t: 1_100, k: "net.err", d: { id: "bodyless-request" } },
+    ];
+
+    const [bug] = groupDistinctBugs([representative], events);
+
+    expect(bug.representative).not.toHaveProperty("bodySnippet");
+  });
+
   it("carries target descriptors into distinct bug evidence and signatures", () => {
     const bugs = groupDistinctBugs([
       candidate({
@@ -202,6 +272,78 @@ describe("groupDistinctBugs", () => {
         bug.frontendEvidence.map((ref) => ref.target?.componentName),
       ),
     ).toEqual(["Pressable", "Pressable"]);
+  });
+});
+
+describe("groupDistinctBugs — route-agnostic beacon collapse (CRUMB-94)", () => {
+  const rejection = (id: string, t: number, route: string) =>
+    candidate({
+      id,
+      detector: "unhandled_rejection",
+      title: "Unhandled rejection: Failed to fetch",
+      severity: "low",
+      score: 15,
+      anchor: { t, route, message: "Failed to fetch" },
+      evidenceWindow: { start: t - 15, end: t + 45, windowId: `win_${id}` },
+    });
+
+  const spread: EvidenceCandidate[] = [
+    rejection("cand_r1", 1_000, "https://alertbase.ai/dashboard/jobs"),
+    rejection("cand_r2", 90_000, "https://alertbase.ai/dashboard/billing"),
+    rejection("cand_r3", 180_000, "https://alertbase.ai/dashboard/settings"),
+    rejection("cand_r4", 270_000, "https://alertbase.ai/dashboard/jobs?tab=2"),
+    rejection("cand_r5", 360_000, "https://alertbase.ai/dashboard/reports"),
+  ];
+
+  it("collapses N same-signature rejections across URLs into one bug with occurrence info", () => {
+    const bugs = groupDistinctBugs(spread);
+
+    expect(bugs).toHaveLength(1);
+    const [bug] = bugs;
+    expect(bug.occurrenceCount).toBe(5);
+    expect(bug.affectedUrls).toHaveLength(5);
+    // Per-occurrence evidence windows are preserved on the single merged bug.
+    expect(bug.frontendEvidence).toHaveLength(5);
+    expect(bug.candidateIds).toEqual([
+      "cand_r1",
+      "cand_r2",
+      "cand_r3",
+      "cand_r4",
+      "cand_r5",
+    ]);
+  });
+
+  it("is deterministic regardless of input order", () => {
+    expect(groupDistinctBugs([...spread].reverse())).toEqual(
+      groupDistinctBugs(spread),
+    );
+  });
+
+  it("keeps a real first-party failure ranked above the collapsed beacon noise", () => {
+    const firstParty = candidate({
+      id: "cand_http",
+      detector: "http_error",
+      title: "HTTP 404 from GET /api/jobs",
+      severity: "medium",
+      score: 70,
+      anchor: {
+        t: 5_000,
+        route: "/dashboard/jobs",
+        method: "GET",
+        status: 404,
+        message: "HTTP 404",
+      },
+    });
+
+    const bugs = groupDistinctBugs([...spread, firstParty]);
+
+    // One collapsed beacon bug + one first-party bug, first-party ranked first (severity desc).
+    expect(bugs).toHaveLength(2);
+    expect(bugs[0].representative.detector).toBe("http_error");
+    expect(bugs[0].severity).toBe("medium");
+    expect(bugs[1].representative.detector).toBe("unhandled_rejection");
+    expect(bugs[1].severity).toBe("low");
+    expect(bugs[1].occurrenceCount).toBe(5);
   });
 });
 

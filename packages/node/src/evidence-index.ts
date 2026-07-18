@@ -33,6 +33,71 @@ export const CAUSAL_RANK_CONSTANTS = {
   SEVERITY_WEIGHT: { critical: 4, high: 3, medium: 2, low: 1 },
 } as const;
 
+/**
+ * Heuristic denylist of third-party analytics / advertising beacon host patterns. A "Failed to
+ * fetch" (or network error) whose target host matches one of these is almost never the user facing
+ * bug: it is a tracking or ads beacon blocked by the browser's tracking prevention or an ad blocker.
+ * Such failures are downranked and their severity reduced (never suppressed) so they cannot drown a
+ * genuine first-party failure.
+ *
+ * This list is intentionally non-exhaustive and safe to extend. Matching is case-insensitive and
+ * host-suffix based, so subdomains (for example `www.google-analytics.com`) are covered. A pattern
+ * containing a `/` is matched against `host + pathname` so collector paths on otherwise generic
+ * hosts (for example `google.com/g/collect`) can be flagged without denylisting the whole host.
+ */
+export const TRACKER_BEACON_HOST_PATTERNS: readonly string[] = [
+  // Google analytics / tag manager / ads
+  "google-analytics.com",
+  "analytics.google.com",
+  "googletagmanager.com",
+  "googletagservices.com",
+  "googlesyndication.com",
+  "pagead2.googlesyndication.com",
+  "doubleclick.net",
+  "stats.g.doubleclick.net",
+  "adservice.google.com",
+  "google.com/g/collect",
+  "google.com/pagead",
+  "google.com/ads",
+  // Meta / Facebook
+  "connect.facebook.net",
+  "graph.facebook.com",
+  "facebook.com/tr",
+  // Product analytics / session replay
+  "hotjar.com",
+  "segment.com",
+  "segment.io",
+  "mixpanel.com",
+  "cdn.mxpnl.com",
+  "amplitude.com",
+  "cdn.amplitude.com",
+  "fullstory.com",
+  "clarity.ms",
+  "quantserve.com",
+  "scorecardresearch.com",
+];
+
+// Correlation window: a fetch-level rejection fired within this many ms of a blocked beacon request
+// is treated as that beacon's downstream rejection. Kept tight so we only fold in the beacon's own
+// unhandled rejection, not an unrelated failure that merely happened nearby.
+const TRACKER_BEACON_CORRELATION_MS = 2_000;
+
+// Ceiling score applied to a confirmed tracker-beacon failure. Low enough to sit beneath a
+// first-party 4xx (70) while staying above pure-noise signals, so it is reordered, not hidden.
+const TRACKER_BEACON_SCORE = 15;
+
+// Fetch-level rejection detectors that carry no url of their own, so they must be correlated to a
+// nearby blocked beacon request to be recognised as beacon noise.
+const FETCH_REJECTION_DETECTORS = new Set([
+  "unhandled_rejection",
+  "uncaught_error",
+]);
+
+// Messages that indicate a bare network/fetch failure (the shape a blocked beacon produces). Used
+// only to gate the nearby-beacon correlation, never on its own.
+const FETCH_FAILURE_MESSAGE_PATTERN =
+  /failed to fetch|networkerror|load failed|fetch failed|err_(?:blocked|failed|network)|net::err|blocked by client/i;
+
 export interface EvidenceIndexInput {
   sessionDir: string;
   events: BugEvent[];
@@ -379,6 +444,11 @@ export function buildEvidenceCandidates(
   addBackendErrorCandidates(events, index, drafts);
   addDbDiffCandidates(events, index, drafts);
   addOtelDbActivityCandidates(events, index, drafts);
+
+  // Downrank known third-party analytics/ads beacon failures before dedupe/ranking so a blocked
+  // tracker beacon cannot outrank (or drown) a genuine first-party failure. Ranking-only in spirit:
+  // it lowers score/severity for beacon noise but never removes a candidate.
+  downrankTrackerBeacons(drafts, events, index);
 
   const deduped = dedupeDrafts(drafts);
   // Baseline order (score desc, anchor.t asc, dedupeKey asc). The causal re-rank below only reorders
@@ -1303,6 +1373,112 @@ function normalizeErrorSignature(value: unknown): string {
     .replace(/\d+/g, "#")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Reduces the score/severity of candidates that are (or correlate to) a blocked third-party
+ * analytics/ads beacon. Two paths, both conservative:
+ *  - Direct: a candidate whose own failing request targets a denylisted tracker host (network_error /
+ *    http_error carry the url or request id).
+ *  - Correlated: a bare fetch-level rejection (no url of its own) fired within
+ *    {@link TRACKER_BEACON_CORRELATION_MS} of a blocked beacon request.
+ * Candidates with unknown or first-party targets are left untouched.
+ */
+function downrankTrackerBeacons(
+  drafts: CandidateDraft[],
+  events: BugEvent[],
+  index: EvidenceIndexInput["index"],
+): void {
+  const beaconFailures = collectTrackerBeaconFailures(events, index);
+  if (beaconFailures.length === 0) return;
+  const beaconRequestIds = new Set(
+    beaconFailures
+      .map((failure) => failure.requestId)
+      .filter((id): id is string => id !== undefined),
+  );
+  for (const draft of drafts) {
+    if (!isTrackerBeaconDraft(draft, beaconFailures, beaconRequestIds)) continue;
+    draft.score = Math.min(draft.score, TRACKER_BEACON_SCORE);
+    draft.severity = "low";
+  }
+}
+
+function isTrackerBeaconDraft(
+  draft: CandidateDraft,
+  beaconFailures: Array<{ t: number; requestId?: string }>,
+  beaconRequestIds: Set<string>,
+): boolean {
+  // Direct: this candidate IS the blocked beacon request.
+  if (draft.anchor.requestId && beaconRequestIds.has(draft.anchor.requestId)) {
+    return true;
+  }
+  if (matchTrackerBeaconHost(draft.anchor.url)) return true;
+  // Correlated: a bare fetch failure rejection fired next to a blocked beacon.
+  if (
+    FETCH_REJECTION_DETECTORS.has(draft.detector) &&
+    FETCH_FAILURE_MESSAGE_PATTERN.test(draft.anchor.message ?? draft.title)
+  ) {
+    return beaconFailures.some(
+      (failure) =>
+        Math.abs(failure.t - draft.anchor.t) <= TRACKER_BEACON_CORRELATION_MS,
+    );
+  }
+  return false;
+}
+
+function collectTrackerBeaconFailures(
+  events: BugEvent[],
+  index: EvidenceIndexInput["index"],
+): Array<{ t: number; requestId?: string }> {
+  const failures: Array<{ t: number; requestId?: string }> = [];
+  for (const event of events) {
+    if (event.k !== "net.err") continue;
+    if (matchTrackerBeaconHost(safeText(event.d.url, 400))) {
+      failures.push(
+        removeUndefined({ t: event.t, requestId: requestIdForEvent(event) }),
+      );
+    }
+  }
+  for (const entry of index.networkErrors ?? []) {
+    if (matchTrackerBeaconHost(entry.url)) {
+      failures.push(
+        removeUndefined({ t: entry.t, requestId: requestIdForValue(entry) }),
+      );
+    }
+  }
+  for (const failed of index.failedReqs ?? []) {
+    if (matchTrackerBeaconHost(failed.url)) {
+      failures.push(
+        removeUndefined({ t: failed.t, requestId: requestIdForValue(failed) }),
+      );
+    }
+  }
+  return failures;
+}
+
+/** True when the url's host (or host+path) matches the heuristic tracker-beacon denylist. */
+function matchTrackerBeaconHost(url: unknown): boolean {
+  if (typeof url !== "string" || url.trim().length === 0) return false;
+  const raw = url.trim();
+  let host: string;
+  let hostPath: string;
+  try {
+    const parsed = new URL(
+      /^[a-z][a-z\d+.-]*:\/\//i.test(raw)
+        ? raw
+        : `https://${raw.replace(/^\/+/, "")}`,
+    );
+    host = parsed.host.toLowerCase();
+    hostPath = `${host}${parsed.pathname.toLowerCase()}`;
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  return TRACKER_BEACON_HOST_PATTERNS.some((pattern) =>
+    pattern.includes("/")
+      ? hostPath.includes(pattern)
+      : host === pattern || host.endsWith(`.${pattern}`),
+  );
 }
 
 function collectResponsesByTimeStatus(

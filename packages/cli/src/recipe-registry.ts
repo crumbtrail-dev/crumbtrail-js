@@ -89,7 +89,7 @@ const NODE_KEY: KeyRef = {
  */
 export const SDK_VERSION_FLOORS: Record<string, string> = {
   "crumbtrail-core": "0.5.0",
-  "crumbtrail-node": "0.6.0",
+  "crumbtrail-node": "0.7.0",
   "crumbtrail-react-native": "0.2.3",
   "crumbtrail-tauri": "0.2.3",
 };

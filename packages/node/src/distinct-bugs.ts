@@ -1,6 +1,7 @@
 import { hashString } from "crumbtrail-core";
-import type { TargetDescriptor } from "crumbtrail-core";
+import type { BugEvent, TargetDescriptor } from "crumbtrail-core";
 import type { EvidenceCandidate } from "./evidence-index";
+import { redactedNetworkBodySnippet } from "./network-body";
 
 export const DISTINCT_BUGS_SCHEMA_VERSION = 1 as const;
 
@@ -47,11 +48,21 @@ export interface DistinctBug {
     status?: number;
     target?: TargetDescriptor;
     requestId?: string;
+    /** Bounded, redacted payload evidence for this representative's failed request. */
+    bodySnippet?: { request?: string; response?: string };
   };
   frontendEvidence: DistinctBugEvidenceRef[];
   backendEvidence: DistinctBugEvidenceRef[];
   dbDiffs?: DistinctBugEvidenceRef[];
   candidateIds: string[];
+  /**
+   * Number of distinct occurrences that collapsed into this bug when the same signal recurred across
+   * multiple page URLs (for example one blocked-beacon rejection per navigation). Present only when
+   * the collapse spanned more than one URL; a single-URL bug omits it.
+   */
+  occurrenceCount?: number;
+  /** Sorted, already-redacted list of the affected page routes when a bug spans multiple URLs. */
+  affectedUrls?: string[];
 }
 
 export interface DistinctBugRecurrenceInput {
@@ -100,6 +111,14 @@ export interface DistinctBugRecurrence {
 const BACKEND_DETECTORS = new Set(["otel_span_error", "otel_log_error"]);
 const DB_DETECTORS = new Set(["db_mutation"]);
 
+// Detectors whose failures share one root cause regardless of which page they fired on. A blocked
+// third-party fetch (classic "Unhandled rejection: Failed to fetch") repeats once per navigation, so
+// its per-URL candidates must collapse into ONE ranked bug (with an occurrence count and the list of
+// affected URLs) instead of N separate high-severity entries. These cluster by
+// `(detector + normalized signature)` ONLY — route and time-window are ignored — so every occurrence
+// folds together while per-occurrence evidence windows are preserved on the merged bug.
+const ROUTE_AGNOSTIC_DETECTORS = new Set(["unhandled_rejection"]);
+
 // Two non-correlated candidates with the same normalized signature but anchored more than this far
 // apart are treated as separate bugs ("nearby time window" clustering). Correlated candidates
 // (shared requestId/traceId) always collapse into one bug regardless of spacing.
@@ -138,6 +157,7 @@ interface Cluster {
  */
 export function groupDistinctBugs(
   candidates: EvidenceCandidate[],
+  events: BugEvent[] = [],
 ): DistinctBug[] {
   // Deterministic processing order: time asc, score desc, id asc. Independent of input order.
   const ordered = [...candidates].sort(
@@ -146,6 +166,7 @@ export function groupDistinctBugs(
   );
 
   const byRequest = new Map<string, Cluster>();
+  const routeAgnosticBySignature = new Map<string, Cluster>();
   const openBySignature = new Map<string, Cluster>();
   const signatureUseCount = new Map<string, number>();
   const clusters: Cluster[] = [];
@@ -158,6 +179,21 @@ export function groupDistinctBugs(
       if (!cluster) {
         cluster = { key, members: [] };
         byRequest.set(key, cluster);
+        clusters.push(cluster);
+      }
+      cluster.members.push({ candidate });
+      continue;
+    }
+
+    // Route-agnostic collapse: same detector + normalized signature folds into ONE bug across every
+    // page URL and any time gap (no component/route or CLUSTER_WINDOW split). This is what pulls the
+    // N per-navigation "Failed to fetch" rejections into a single ranked signal.
+    if (ROUTE_AGNOSTIC_DETECTORS.has(candidate.detector)) {
+      const key = `sig:${candidate.detector}|${normalizeSignature(candidate)}`;
+      let cluster = routeAgnosticBySignature.get(key);
+      if (!cluster) {
+        cluster = { key, members: [] };
+        routeAgnosticBySignature.set(key, cluster);
         clusters.push(cluster);
       }
       cluster.members.push({ candidate });
@@ -179,7 +215,7 @@ export function groupDistinctBugs(
     clusters.push(cluster);
   }
 
-  const bugs = clusters.map((cluster) => buildBug(cluster));
+  const bugs = clusters.map((cluster) => buildBug(cluster, events));
   bugs.sort(
     (a, b) =>
       SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
@@ -290,7 +326,7 @@ export function groupDistinctBugRecurrences(
   );
 }
 
-function buildBug(cluster: Cluster): DistinctBug {
+function buildBug(cluster: Cluster, events: BugEvent[]): DistinctBug {
   const candidates = cluster.members.map((member) => member.candidate);
   // Representative = highest score, then earliest, then lowest id (deterministic).
   const representative = [...candidates].sort(
@@ -340,6 +376,16 @@ function buildBug(cluster: Cluster): DistinctBug {
     .map((candidate) => candidate.id)
     .sort((a, b) => a.localeCompare(b));
 
+  // When one signal recurred across multiple page URLs (the collapsed beacon-rejection case), surface
+  // an occurrence count and the affected routes so the single ranked bug still reports its spread.
+  const affectedUrls = Array.from(
+    new Set(
+      candidates
+        .map((candidate) => candidate.anchor.route)
+        .filter((route): route is string => typeof route === "string" && route !== ""),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+
   const bug: DistinctBug = {
     schemaVersion: DISTINCT_BUGS_SCHEMA_VERSION,
     bugId: `bug_${hashString(cluster.key)}`,
@@ -359,13 +405,90 @@ function buildBug(cluster: Cluster): DistinctBug {
       status: representative.anchor.status,
       target: representative.anchor.target,
       requestId: representative.anchor.requestId,
+      bodySnippet: failedRequestBodySnippet(representative, events),
     }) as DistinctBug["representative"],
     frontendEvidence,
     backendEvidence,
     ...(dbDiffs.length > 0 ? { dbDiffs } : {}),
     candidateIds,
+    ...(affectedUrls.length > 1
+      ? { occurrenceCount: candidates.length, affectedUrls }
+      : {}),
   };
   return bug;
+}
+
+/**
+ * Reuses the evidence-window association rule: a request id is authoritative;
+ * legacy id-less events are usable only when exactly one response/error matches.
+ * This prevents same-millisecond failures from borrowing another request's body.
+ */
+function failedRequestBodySnippet(
+  candidate: EvidenceCandidate,
+  events: BugEvent[],
+): { request?: string; response?: string } | undefined {
+  const anchor = failedNetworkAnchor(candidate, events);
+  if (!anchor) return undefined;
+
+  const requestId = candidate.anchor.requestId ?? requestIdForEvent(anchor);
+  const request = requestId
+    ? events.find(
+        (event) =>
+          event.k === "net.req" && requestIdForEvent(event) === requestId,
+      )
+    : undefined;
+  const bodySnippet = removeUndefined({
+    request: request
+      ? redactedNetworkBodySnippet(request.d.body, request.d.bodySummary)
+      : undefined,
+    response:
+      anchor.k === "net.res"
+        ? redactedNetworkBodySnippet(anchor.d.body, anchor.d.bodySummary)
+        : undefined,
+  });
+  return bodySnippet.request || bodySnippet.response ? bodySnippet : undefined;
+}
+
+function failedNetworkAnchor(
+  candidate: EvidenceCandidate,
+  events: BugEvent[],
+): BugEvent | undefined {
+  const id = candidate.anchor.requestId;
+  const matchingEvents = id
+    ? events.filter(
+        (event) =>
+          (event.k === "net.res" || event.k === "net.err") &&
+          requestIdForEvent(event) === id,
+      )
+    : events.filter(
+        (event) =>
+          event.t === candidate.anchor.t &&
+          (event.k === "net.res" || event.k === "net.err") &&
+          (candidate.anchor.status === undefined ||
+            event.k !== "net.res" ||
+            event.d.st === candidate.anchor.status),
+      );
+  if (matchingEvents.length !== 1) return undefined;
+
+  const [anchor] = matchingEvents;
+  if (anchor.k === "net.err") return anchor;
+  const status = finiteNumber(anchor.d.st);
+  return status !== undefined &&
+    (status >= 400 || candidate.detector === "app_2xx_failure")
+    ? anchor
+    : undefined;
+}
+
+function requestIdForEvent(event: BugEvent): string | undefined {
+  const id = event.d.id;
+  if (typeof id === "number" && Number.isFinite(id)) return String(id);
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function toEvidenceRef(candidate: EvidenceCandidate): DistinctBugEvidenceRef {

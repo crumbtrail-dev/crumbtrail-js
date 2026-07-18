@@ -356,7 +356,7 @@ const TOOLS = [
   {
     name: "listDistinctBugs",
     description:
-      'List the DISTINCT bugs a session hit, grouped deterministically from detector signals within a session. With mode:"cross-session", scans finalized sessions and returns recurrence rollups by stable bug signature. Use getBug for one session bug, or getRecurrence(signature) for one recurrence.',
+      'List the DISTINCT bugs a session hit, grouped deterministically from detector signals within a session. A signal that recurs across page URLs (for example a blocked third-party analytics beacon rejection) collapses into one bug carrying occurrenceCount and affectedUrls. With mode:"cross-session", scans finalized sessions and returns recurrence rollups by stable bug signature. Use getBug for one session bug, or getRecurrence(signature) for one recurrence.',
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1924,6 +1924,10 @@ export class McpServer {
           window: isRecord(bug.window) ? bug.window : undefined,
           requestIds: Array.isArray(bug.requestIds)
             ? bug.requestIds
+            : undefined,
+          occurrenceCount: numberField(bug.occurrenceCount),
+          affectedUrls: Array.isArray(bug.affectedUrls)
+            ? bug.affectedUrls
             : undefined,
           counts: {
             frontend: Array.isArray(bug.frontendEvidence)
