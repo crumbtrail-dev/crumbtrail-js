@@ -19,6 +19,7 @@ them require it.
 | [`crumbtrail-react-native`](packages/react-native) | React Native bindings. |
 | [`crumbtrail-tauri`](packages/tauri) | Tauri (Rust desktop) bindings. |
 | [`crumbtrail-install-shared`](packages/install-shared) | Install recipes and agent prompts shared by the CLI and the dashboard. |
+| [`crumbtrail-detect-core`](packages/detect-core) | Framework detection and injection planning, shared by the CLI and cloud automation. Reads only and writes nothing. |
 
 ## Quick start
 
