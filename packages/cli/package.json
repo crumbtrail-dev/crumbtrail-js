@@ -49,6 +49,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "pretest": "pnpm --filter crumbtrail-detect-core build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
@@ -58,7 +59,8 @@
   "devDependencies": {
     "@types/node": "^25.5.0",
     "crumbtrail-core": "workspace:^",
-    "crumbtrail-install-shared": "workspace:^"
+    "crumbtrail-install-shared": "workspace:^",
+    "crumbtrail-detect-core": "workspace:^"
   },
   "homepage": "https://crumbtrail.ai",
   "bugs": {

@@ -56,11 +56,27 @@ importers:
       crumbtrail-core:
         specifier: workspace:^
         version: link:../core
+      crumbtrail-detect-core:
+        specifier: workspace:^
+        version: link:../detect-core
       crumbtrail-install-shared:
         specifier: workspace:^
         version: link:../install-shared
 
   packages/core: {}
+
+  packages/detect-core:
+    dependencies:
+      crumbtrail-core:
+        specifier: workspace:^
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.9.5
+      crumbtrail-install-shared:
+        specifier: workspace:^
+        version: link:../install-shared
 
   packages/install-shared:
     dependencies:

@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import {
   buildPlan,
   DENO_UNSUPPORTED_REASON,
+  defaultInjectIO,
   detect,
   executePlan,
   type DetectResult,
@@ -620,7 +621,7 @@ export async function runWizard(
     nextVersion: result.nextVersion,
     stack: result.otlpStack ?? undefined,
     options: { force: parsed.yes },
-  });
+  }, defaultInjectIO);
 
   // 5. Install the SDK (repo-mutating: adds deps to package.json).
   const install = await deps.installSdk({
@@ -1008,7 +1009,7 @@ export async function runBatchWizard(
         nextVersion: c.detected.nextVersion,
         stack: c.detected.otlpStack ?? undefined,
         options: { force: parsed.yes },
-      });
+      }, defaultInjectIO);
 
       const install = await deps.installSdk({
         cwd: c.dir,

@@ -12,8 +12,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { prependIntoSource, withTrailingNewline } from "./text";
-import type { Plan } from "./types";
+import {
+  prependIntoSource,
+  withTrailingNewline,
+  type Plan,
+} from "crumbtrail-detect-core";
 
 /** Write boundary for the executor — swappable in tests. */
 export interface ExecutorIO {

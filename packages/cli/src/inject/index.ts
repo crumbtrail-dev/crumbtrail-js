@@ -1,6 +1,2 @@
-export * from "./types";
-export * from "./text";
-export * from "./snippets";
-export * from "./io";
-export * from "./recipes";
+export * from "crumbtrail-detect-core";
 export * from "./executor";

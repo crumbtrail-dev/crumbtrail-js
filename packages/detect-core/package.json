@@ -1,0 +1,48 @@
+{
+  "name": "crumbtrail-detect-core",
+  "version": "0.1.0",
+  "description": "Side-effect-free Crumbtrail project detection and injection planning.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CrumbtrailDev/crumbtrail-cli.git",
+    "directory": "packages/detect-core"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "require": "./dist/testing.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "crumbtrail-core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "crumbtrail-install-shared": "workspace:^"
+  },
+  "homepage": "https://crumbtrail.ai",
+  "bugs": { "url": "https://github.com/CrumbtrailDev/crumbtrail-cli/issues" },
+  "keywords": ["crumbtrail", "detection", "injection", "install"]
+}
