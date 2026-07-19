@@ -56,10 +56,16 @@ export interface ExecuteResult {
   message: string;
 }
 
-type FileOp =
-  | { op: "create"; path: string; content: string }
-  | { op: "prepend"; path: string; block: string }
-  | { op: "replace"; path: string; content: string };
+export interface MaterializedPlan {
+  kind: Plan["kind"];
+  edits: Array<{
+    path: string;
+    mode: "create" | "update";
+    content: string;
+  }>;
+  warnings: string[];
+  keyEnvVar?: string;
+}
 
 interface PreImage {
   path: string;
@@ -67,33 +73,27 @@ interface PreImage {
   content: string | null;
 }
 
-function applyAllOrNothing(ops: FileOp[], io: ExecutorIO): string[] {
+function applyAllOrNothing(
+  edits: MaterializedPlan["edits"],
+  io: ExecutorIO,
+): string[] {
   const preimages: PreImage[] = [];
   const written: string[] = [];
   try {
-    for (const op of ops) {
-      const existed = io.exists(op.path);
-      const prior = existed ? io.readFile(op.path) : null;
-      preimages.push({ path: op.path, existed, content: prior });
-
-      let next: string;
-      switch (op.op) {
-        case "create":
-          if (existed) {
-            throw new Error(`refusing to overwrite existing file: ${op.path}`);
-          }
-          next = op.content;
-          break;
-        case "prepend":
-          next = prependIntoSource(prior ?? "", op.block);
-          break;
-        case "replace":
-          next = op.content;
-          break;
+    for (const edit of edits) {
+      const existed = io.exists(edit.path);
+      // Reasserted at write time, not just at materialization time. The gap
+      // between the two is a TOCTOU window, and a multi edit array could
+      // otherwise clobber a file created by an earlier edit in the same batch.
+      if (existed && edit.mode === "create") {
+        throw new Error(`refusing to overwrite existing file: ${edit.path}`);
       }
-      io.mkdirp(path.dirname(op.path));
-      io.writeFile(op.path, next);
-      written.push(op.path);
+      const prior = existed ? io.readFile(edit.path) : null;
+      preimages.push({ path: edit.path, existed, content: prior });
+
+      io.mkdirp(path.dirname(edit.path));
+      io.writeFile(edit.path, edit.content);
+      written.push(edit.path);
     }
     return written;
   } catch (err) {
@@ -104,6 +104,81 @@ function applyAllOrNothing(ops: FileOp[], io: ExecutorIO): string[] {
     }
     throw err;
   }
+}
+
+/**
+ * Resolve a Plan into exact file bytes without writing them. This is shared by
+ * the CLI writer and cloud callers so both materialize injection output by the
+ * same construction.
+ *
+ * `kind` on the result is always the ORIGINAL plan kind, so a caller can still
+ * tell that a plan needed confirmation. The dirty gate itself is CLI-only.
+ *
+ * Known divergence for cloud callers: `io.exists` follows symlinks, so a
+ * symlinked targetPath materializes as an update and the CLI writes through to
+ * the link target, whereas a GitHub update would replace the symlink blob
+ * itself. Different files receive the bytes. Resolve symlinks before calling if
+ * a repository may contain them.
+ */
+export function materializePlan(plan: Plan, io: ExecutorIO): MaterializedPlan {
+  const materialized: MaterializedPlan = {
+    kind: plan.kind,
+    edits: [],
+    // Copied, not aliased: a cloud caller mutating this must not reach the Plan.
+    warnings: [...plan.warnings],
+    keyEnvVar: plan.keyEnvVar,
+  };
+
+  if (
+    plan.kind === "skip-already-wired" ||
+    plan.kind === "fallback-ai" ||
+    plan.kind === "otlp-guidance" ||
+    !plan.targetPath ||
+    plan.content == null ||
+    plan.content === ""
+  ) {
+    return materialized;
+  }
+
+  // needs-confirm-dirty carries its real write shape in applyMode. Resolving it
+  // here rather than in executePlan is what stops a cloud caller from silently
+  // receiving zero edits for a plan that should produce a pull request.
+  const effectiveKind =
+    plan.kind === "needs-confirm-dirty"
+      ? plan.applyMode === "rewrite"
+        ? "rewrite"
+        : "prepend"
+      : plan.kind;
+
+  if (effectiveKind === "create") {
+    if (io.exists(plan.targetPath)) {
+      throw new Error(`refusing to overwrite existing file: ${plan.targetPath}`);
+    }
+    materialized.edits.push({
+      path: plan.targetPath,
+      mode: "create",
+      content: withTrailingNewline(plan.content),
+    });
+  } else if (effectiveKind === "rewrite") {
+    // mode is derived, never assumed: the cloud picks GitHub create vs update
+    // from it, and an update needs a blob SHA that a new path does not have.
+    materialized.edits.push({
+      path: plan.targetPath,
+      mode: io.exists(plan.targetPath) ? "update" : "create",
+      content: withTrailingNewline(plan.content),
+    });
+  } else {
+    const existed = io.exists(plan.targetPath);
+    const prior = existed ? io.readFile(plan.targetPath) : null;
+    materialized.edits.push({
+      path: plan.targetPath,
+      // prependIntoSource("", block) legitimately produces a new file.
+      mode: existed ? "update" : "create",
+      content: prependIntoSource(prior ?? "", plan.content),
+    });
+  }
+
+  return materialized;
 }
 
 /**
@@ -154,32 +229,11 @@ export function executePlan(
     };
   }
 
-  const ops: FileOp[] = [];
-  if (plan.targetPath && plan.content != null) {
-    if (plan.kind === "create") {
-      ops.push({
-        op: "create",
-        path: plan.targetPath,
-        content: withTrailingNewline(plan.content),
-      });
-    } else if (
-      plan.kind === "rewrite" ||
-      (plan.kind === "needs-confirm-dirty" && plan.applyMode === "rewrite")
-    ) {
-      // Full-file rewrite (Express middleware wiring): content is the whole
-      // transformed file, not a block to prepend.
-      ops.push({
-        op: "replace",
-        path: plan.targetPath,
-        content: withTrailingNewline(plan.content),
-      });
-    } else {
-      // prepend, or a confirmed needs-confirm-dirty plan in prepend mode
-      ops.push({ op: "prepend", path: plan.targetPath, block: plan.content });
-    }
-  }
-
-  const written = applyAllOrNothing(ops, io);
+  // The dirty *gate* above is CLI-only: a working tree is not a concept the
+  // cloud has. Resolving applyMode into a kind is plan semantics, though, so it
+  // lives inside materializePlan where both callers share it.
+  const materialized = materializePlan(plan, io);
+  const written = applyAllOrNothing(materialized.edits, io);
   return {
     kind: plan.kind,
     written,
