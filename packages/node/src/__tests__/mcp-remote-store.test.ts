@@ -70,6 +70,8 @@ type HeadSupport = "head" | "get-only";
 interface MockCloud {
   baseUrl: string;
   requests: MockRequest[];
+  abortedRequests: MockRequest[];
+  waitForAbort(request: MockRequest): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -148,13 +150,20 @@ function startMockCloud({
   headSupport = "head",
 }: MockCloudOptions = {}): Promise<MockCloud> {
   const requests: MockRequest[] = [];
+  const abortedRequests: MockRequest[] = [];
+  const abortWaiters = new Map<MockRequest, () => void>();
   const sockets = new Set<Socket>();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "", "http://mock.local");
-    requests.push({
+    const request = {
       method: req.method,
       path: `${url.pathname}${url.search}`,
       authorization: req.headers.authorization,
+    };
+    requests.push(request);
+    req.once("aborted", () => {
+      abortedRequests.push(request);
+      abortWaiters.get(request)?.();
     });
 
     // An old cloud rejected the method before it ever looked at the route, so
@@ -288,6 +297,13 @@ function startMockCloud({
       resolve({
         baseUrl: `http://127.0.0.1:${address.port}`,
         requests,
+        abortedRequests,
+        waitForAbort: (request) => {
+          if (abortedRequests.includes(request)) return Promise.resolve();
+          return new Promise<void>((resolveAbort) => {
+            abortWaiters.set(request, resolveAbort);
+          });
+        },
         stop: () =>
           new Promise<void>((resolveStop, rejectStop) =>
             {
@@ -664,18 +680,20 @@ describe("MCP remote read store", () => {
     // node holds the header back, so there is nothing to read a size from and
     // the deadline is the only exit. The stat must NOT then retry as a GET —
     // a dead endpoint would just cost a second timeout — so this ends after
-    // one request. Asserting the elapsed time keeps it from passing vacuously:
-    // a stat that gave up early would return undefined too.
+    // one request. The mock records the server-side abort, which proves the
+    // deadline ended the stalled request without a scheduler-sensitive clock
+    // assertion.
     mock.requests.length = 0;
-    const startedAt = Date.now();
-    await expect(store.statArtifact(SESSION_ID, "index.json")).resolves.toBeUndefined();
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(timeoutMs);
+    mock.abortedRequests.length = 0;
+    await expect(
+      store.statArtifact(SESSION_ID, "index.json"),
+    ).resolves.toBeUndefined();
 
-    expect(
-      mock.requests
-        .filter((request) => request.path.endsWith("/artifacts/index.json"))
-        .map((request) => request.method),
-    ).toEqual(["HEAD"]);
+    const statRequests = mock.requests.filter((request) =>
+      request.path.endsWith("/artifacts/index.json"),
+    );
+    expect(statRequests.map((request) => request.method)).toEqual(["HEAD"]);
+    await mock.waitForAbort(statRequests[0]);
   });
 
   it("times out the stat byteLength fallback when only the body stalls", async () => {
@@ -691,17 +709,19 @@ describe("MCP remote read store", () => {
     });
 
     mock.requests.length = 0;
-    const startedAt = Date.now();
+    mock.abortedRequests.length = 0;
     await expect(
       store.statArtifact(SESSION_ID, "index.json"),
     ).resolves.toBeUndefined();
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(timeoutMs);
 
-    expect(
-      mock.requests
-        .filter((request) => request.path.endsWith("/artifacts/index.json"))
-        .map((request) => request.method),
-    ).toEqual(["HEAD", "GET"]);
+    const statRequests = mock.requests.filter((request) =>
+      request.path.endsWith("/artifacts/index.json"),
+    );
+    expect(statRequests.map((request) => request.method)).toEqual([
+      "HEAD",
+      "GET",
+    ]);
+    await mock.waitForAbort(statRequests[1]);
   });
 
   it("rejects an advertised oversized body without waiting for it", async () => {
