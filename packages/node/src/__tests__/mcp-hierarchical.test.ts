@@ -228,8 +228,9 @@ describe("MCP hierarchical retrieval", () => {
     expect(names).toContain("getSessionManifest");
     expect(names).toContain("getWindow");
     expect(names).toContain("getEvidence");
-    // 34 includes the optional getOpinion opinion retrieval tool.
-    expect(result.tools).toHaveLength(34);
+    // 35 includes the optional getOpinion opinion retrieval tool and the
+    // searchSpecs spec oracle.
+    expect(result.tools).toHaveLength(35);
   });
 
   it("getSessionManifest returns the manifest.json payload (small, hot-plane)", async () => {

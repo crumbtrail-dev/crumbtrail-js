@@ -253,6 +253,61 @@ export function notConfiguredKnowledgeResult(): KnowledgeResult {
 }
 
 /**
+ * The request shape itself could not be processed. Module-level rather than a
+ * private method because two layers need the *same* gap: the client, when a
+ * value survives the coercers and still breaks the pure CQL builder, and CP3's
+ * MCP dispatch, when an argument arrives with a type that cannot mean anything
+ * (`query: 42`). Coercing that to `""` at the boundary reported "empty after
+ * sanitization", which sends the agent off to rephrase a query whose *type* was
+ * the problem — it would retry the identical malformed shape.
+ */
+export function unusableInputGap(): EvidenceGap {
+  return knowledgeGap({
+    kind: "request-failed",
+    reason: "confluence: the search request could not be interpreted",
+    suggestion: "query must be text and spaceKeys a list of space-key strings",
+  });
+}
+
+/** {@link unusableInputGap} as a standalone result, for callers outside the client. */
+export function unusableInputKnowledgeResult(): KnowledgeResult {
+  return knowledgeResult([], [unusableInputGap()], {
+    fetched: 0,
+    returned: 0,
+    truncated: false,
+    latencyMs: 0,
+  });
+}
+
+/**
+ * Last-resort degradation for a caller that must not surface an exception.
+ *
+ * {@link ConfluenceKnowledgeClient.searchSpecs} is documented as never
+ * rejecting, but "documented" is not "enforced": a caller that treats the
+ * contract as a load-bearing assumption inherits every future hole in it. This
+ * exists so the assumption can be belt-and-braced by an actual `catch`.
+ *
+ * The message is FIXED and carries nothing from the caught error. A thrown
+ * message can echo the request URL — the exact channel `errorGap` refuses to
+ * reuse for network errors — so interpolating one here would reopen it at a
+ * layer with even less control over the shape.
+ */
+export function unexpectedFailureKnowledgeResult(): KnowledgeResult {
+  return knowledgeResult(
+    [],
+    [
+      knowledgeGap({
+        kind: "request-failed",
+        reason: "confluence: the spec lookup failed unexpectedly",
+        suggestion:
+          "retry the lookup; if it keeps failing, check the Confluence configuration and host logs",
+      }),
+    ],
+    { fetched: 0, returned: 0, truncated: false, latencyMs: 0 },
+  );
+}
+
+/**
  * Confluence HTML → plain text. Deliberately crude and dependency-free: script
  * and style subtrees are dropped whole, block-level tags become newlines so the
  * text does not run together, remaining tags are stripped, and the handful of
@@ -431,7 +486,7 @@ export class ConfluenceKnowledgeClient {
       // `buildSentryQuery`, which gaps whenever a requested join key is dropped.
       loss = describeCqlInputLoss(cqlInput);
     } catch {
-      return knowledgeResult([], [this.unusableInputGap()], {
+      return knowledgeResult([], [unusableInputGap()], {
         fetched: 0,
         returned: 0,
         truncated: false,
@@ -593,13 +648,29 @@ export class ConfluenceKnowledgeClient {
     }
 
     const rows = Array.isArray(payload?.results) ? payload.results : [];
-    const base = payload?._links?.base ?? this.baseUrl;
+    // `?? this.baseUrl` only defends against null/undefined. A non-string `base`
+    // (Confluence is not the only thing that can answer on that URL) flowed
+    // straight into `redactUrl`, which called `url.trim()` and threw.
+    const rawBase = payload?._links?.base;
+    const base =
+      typeof rawBase === "string" && rawBase.length > 0
+        ? rawBase
+        : this.baseUrl;
     const now = clock();
 
     let truncated = false;
     const excerpts: SpecExcerpt[] = [];
     for (const row of rows.slice(0, limit)) {
-      const normalized = this.normalizeRow(row, base, now);
+      // Per-row try/catch: one hostile or broken row must not lose the rows
+      // around it, and must never escape as a rejection. A row can throw on
+      // plain property access — a getter in a deserialized payload, a Proxy —
+      // so field-level type guards alone are not sufficient.
+      let normalized: { excerpt: SpecExcerpt; truncated: boolean } | null;
+      try {
+        normalized = this.normalizeRow(row, base, now);
+      } catch {
+        continue;
+      }
       if (!normalized) continue;
       if (normalized.truncated) truncated = true;
       excerpts.push(normalized.excerpt);
@@ -635,6 +706,12 @@ export class ConfluenceKnowledgeClient {
     base: string,
     now: number,
   ): { excerpt: SpecExcerpt; truncated: boolean } | null {
+    // `ConfluenceSearchRow` is a claim about JSON off the wire, not a checked
+    // fact. `{"results":[null]}` is malformed JSON that the file header already
+    // promises to cover, and `row.body` on it threw rather than gapping —
+    // optional chaining guards `body` being absent, not `row` being null.
+    if (row === null || typeof row !== "object") return null;
+
     const bodyHtml = row.body?.view?.value;
     if (typeof bodyHtml !== "string" || bodyHtml.length === 0) return null;
 
@@ -651,9 +728,17 @@ export class ConfluenceKnowledgeClient {
     const lastModified = Number.isNaN(parsed) ? 0 : parsed;
 
     const excerpt: SpecExcerpt = {
-      title: redactText(row.title ?? "Untitled page", "excerpts[].title"),
+      // `?? "Untitled page"` only covers null/undefined; a numeric title reached
+      // `redactText` and threw on `body.trim()`. Anything non-string is not a
+      // title, so it takes the same path as a missing one.
+      title: redactText(
+        typeof row.title === "string" && row.title.length > 0
+          ? row.title
+          : "Untitled page",
+        "excerpts[].title",
+      ),
       url: pageUrl(row, base),
-      spaceKey: row.space?.key ?? "",
+      spaceKey: typeof row.space?.key === "string" ? row.space.key : "",
       excerpt: excerptText,
       lastModified,
       ageDays: deriveAgeDays(lastModified, now),
@@ -663,21 +748,6 @@ export class ConfluenceKnowledgeClient {
       excerpt.lastModifiedBy = author;
     }
     return { excerpt, truncated: capped.truncated };
-  }
-
-  /**
-   * The request shape itself could not be processed. Reached only when a value
-   * survives {@link coerceQueryText} / {@link coerceSpaceKeys} and still breaks
-   * the pure CQL builder — the backstop that keeps the never-rejects contract a
-   * runtime property rather than a type-system hope.
-   */
-  private unusableInputGap(): EvidenceGap {
-    return knowledgeGap({
-      kind: "request-failed",
-      reason: "confluence: the search request could not be interpreted",
-      suggestion:
-        "query must be text and spaceKeys a list of space-key strings",
-    });
   }
 
   /**

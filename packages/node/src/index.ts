@@ -421,3 +421,46 @@ export type {
 // closed when the marker is absent, so this re-export is load bearing and must
 // survive bundling in both the ESM and CJS dist outputs.
 export { NODE_CONTRACT_CAPABILITIES } from "./node-contract-capabilities";
+
+// ── CP3: knowledge.v1 spec oracle (Confluence) ───────────────────────────────
+// Append-only block. Do not reorder the exports above.
+//
+// A deliberate SUBSET of ./knowledge, NOT a mirror of it. This file is the
+// published npm entry point (package.json exports["."] -> dist/index), so every
+// name below is a compatibility obligation to external consumers. The internal
+// barrel is wider on purpose and the two are not kept in sync: `htmlToText`,
+// `capExcerptBytes`, `parseSpaceKeysEnv`, `MAX_EXCERPT_BYTES`, the CQL builders
+// (`buildSpecSearchCql`, `sanitizeCqlText`, `describeCqlInputLoss`, …) and the
+// gap constructors are implementation details the client already applies for
+// you — an SDK consumer never assembles CQL or caps an excerpt by hand.
+//
+// What remains is exactly the "construct a client, call it, read the result"
+// path: the client and its env factory, the env var names an operator sets, the
+// limit bounds the schema advertises, the clock `searchSpecs` requires (it is
+// not defaulted, by design), the not-configured result, and the result types.
+//
+// The ./knowledge barrel has NO side effects on the evidence framework:
+// importing it registers nothing and leaves EVIDENCE_SOURCE_PROVIDERS
+// unchanged. The `searchSpecs` MCP tool is the first consumer; results are
+// advisory documentation and never enter assembleBundle.
+export {
+  confluenceClientFromEnv,
+  ConfluenceKnowledgeClient,
+  CONFLUENCE_API_TOKEN_ENV,
+  CONFLUENCE_AUTH_FIELDS,
+  CONFLUENCE_BASE_URL_ENV,
+  CONFLUENCE_EMAIL_ENV,
+  CONFLUENCE_SPACE_KEYS_ENV,
+  DEFAULT_SPEC_LIMIT,
+  MAX_SPEC_LIMIT,
+  notConfiguredKnowledgeResult,
+  KNOWLEDGE_SCHEMA_VERSION,
+  systemClock,
+} from "./knowledge";
+export type {
+  ConfluenceClientConfig,
+  SpecSearchRequest,
+  KnowledgeClock,
+  KnowledgeResult,
+  SpecExcerpt,
+} from "./knowledge";

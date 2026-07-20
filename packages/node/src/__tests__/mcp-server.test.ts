@@ -121,7 +121,7 @@ describe("MCP Server", () => {
     });
     expect(res).not.toBeNull();
     const result = res!.result as any;
-    expect(result.tools).toHaveLength(34);
+    expect(result.tools).toHaveLength(35);
     const names = result.tools.map((t: any) => t.name);
     expect(names).toContain("listSessions");
     expect(names).toContain("getFixContext");
