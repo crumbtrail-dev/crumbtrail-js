@@ -14,7 +14,7 @@ import { buildAgentPrompt, buildOtlpSnippets } from "crumbtrail-install-shared";
 import type { Stack } from "crumbtrail-core";
 import type { Recipe } from "../detect";
 import { RECIPE_REGISTRY } from "../recipe-registry";
-import type { InjectIO } from "./io";
+import { defaultInjectIO, type InjectIO } from "./io";
 import type { Plan } from "./types";
 import {
   detectExpressModuleStyle,
@@ -583,7 +583,7 @@ function planOtlp(input: BuildPlanInput): Plan {
  */
 export function buildPlan(
   input: BuildPlanInput,
-  io: InjectIO,
+  io: InjectIO = defaultInjectIO,
 ): Plan {
   const plan = dispatchPlan(input, io);
   // Stamp the env var the injected code reads its key from, so the wizard can

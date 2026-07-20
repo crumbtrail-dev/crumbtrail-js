@@ -21,6 +21,23 @@ describe("executePlan — golden create/prepend on a real repo", () => {
     return r;
   };
 
+  // Regression: buildPlan's `io` default was dropped when detection moved into
+  // crumbtrail-detect-core, so every one-argument caller — the wizard itself and
+  // the installer harness — passed `undefined` and died on `io.readFile`. Every
+  // other test here supplies `io` explicitly, which is exactly why the suite
+  // stayed green while `npx crumbtrail` was broken for all recipes. Calling with
+  // a single argument is the whole point of this test; don't "fix" it by
+  // passing defaultInjectIO.
+  it("defaults io to the real filesystem when called with only an input", () => {
+    const root = tmp({ "package.json": "{}", "src/app.d.ts": "" });
+    const plan = buildPlan({
+      cwd: root,
+      recipe: "sveltekit",
+      endpoint: ENDPOINT,
+    });
+    expect(plan.kind).toBe("create");
+  });
+
   it("creates a SvelteKit hooks.client.ts and is then idempotent on re-run", () => {
     const root = tmp({ "package.json": "{}", "src/app.d.ts": "" });
     const plan = buildPlan(

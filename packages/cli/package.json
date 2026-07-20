@@ -48,6 +48,7 @@
     "access": "public"
   },
   "scripts": {
+    "prebuild": "pnpm --filter crumbtrail-install-shared --filter crumbtrail-detect-core build",
     "build": "tsup",
     "pretest": "pnpm --filter crumbtrail-detect-core build",
     "test": "vitest run",

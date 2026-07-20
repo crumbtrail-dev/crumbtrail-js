@@ -78,6 +78,16 @@ jobs:
           cache-dependency-path: crumbtrail/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
         working-directory: crumbtrail
+      # The gate runs companion test files via `pnpm exec vitest run <file>`,
+      # which bypasses crumbtrail's root `pretest` hook — the hook that builds
+      # crumbtrail-design-system and @crumbtrail-landing/shared. Both resolve via
+      # a gitignored `dist/` that a clean checkout does not have, and
+      # packages/cloud/src/server.ts imports them at transform time, so without
+      # this step every cloud row fails to collect and the gate reports a bare
+      # "Test run exited 1" that looks like a real product regression.
+      - name: Build the companion workspace libraries the gate's tests import
+        working-directory: crumbtrail
+        run: pnpm --filter crumbtrail-design-system build && pnpm --filter @crumbtrail-landing/shared build
       - name: Resolve this checkout's commit
         id: companion
         run: echo "sha=$(git -C crumbtrail-cli rev-parse HEAD)" >> "$GITHUB_OUTPUT"

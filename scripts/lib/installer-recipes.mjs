@@ -32,7 +32,10 @@ export const INSTALLER_RECIPES = {
   "express-cjs": {
     recipe: "express",
     fixtureDir: path.join(fixturesRoot, "express-cjs"),
-    expectedPlanKind: "prepend",
+    // `rewrite`, not `prepend`: Express needs the request middleware wired in
+    // before the routes and the error middleware after them, which a prepend
+    // cannot express. See the rewrite cases in packages/cli recipes.test.ts.
+    expectedPlanKind: "rewrite",
     // The fixture entry is a plain CJS server; there is nothing to compile.
     buildCmd: null,
     runCmd: ["node", "index.js"],
@@ -134,7 +137,8 @@ export const INSTALLER_RECIPES = {
   "express-esm": {
     recipe: "express",
     fixtureDir: path.join(fixturesRoot, "express-esm"),
-    expectedPlanKind: "prepend",
+    // See the express-cjs note: Express is a rewrite, not a prepend.
+    expectedPlanKind: "rewrite",
     buildCmd: null,
     runCmd: ["node", "index.js"],
     portSlot: 49613,
