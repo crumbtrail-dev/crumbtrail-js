@@ -228,16 +228,27 @@ export interface CqlInputLoss {
  */
 export function describeCqlInputLoss(input: SpecCqlInput): CqlInputLoss {
   const collapsed = Array.from(collapseCqlText(input.query ?? ""));
+  return {
+    queryTruncated: collapsed.length > MAX_QUERY_LENGTH,
+    droppedSpaceKeys: countDroppedSpaceKeys(input.spaceKeys ?? []),
+  };
+}
+
+/**
+ * How many distinct requested space keys {@link sanitizeSpaceKeys} would
+ * discard — either malformed under {@link SPACE_KEY_PATTERN} or past
+ * {@link MAX_SPACE_KEYS}.
+ *
+ * Exported so allowlist-only callers (the Confluence client's env boundary and
+ * `doctor`'s `spec-oracle` check) can ask the question directly instead of
+ * fabricating a dummy query just to reach `describeCqlInputLoss`. That function
+ * delegates here, so there is exactly one implementation of the count.
+ */
+export function countDroppedSpaceKeys(keys: readonly string[]): number {
   const requested = new Set(
-    (input.spaceKeys ?? [])
+    keys
       .map((k) => (typeof k === "string" ? k.trim() : ""))
       .filter((k) => k.length > 0),
   );
-  return {
-    queryTruncated: collapsed.length > MAX_QUERY_LENGTH,
-    droppedSpaceKeys: Math.max(
-      0,
-      requested.size - sanitizeSpaceKeys(input.spaceKeys ?? []).length,
-    ),
-  };
+  return Math.max(0, requested.size - sanitizeSpaceKeys(keys).length);
 }

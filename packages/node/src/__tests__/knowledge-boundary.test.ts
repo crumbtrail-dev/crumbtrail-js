@@ -66,26 +66,23 @@ function tryParseEvidenceLaneValues(): string[] | null {
  * `EvidenceLane` is a type, so it is erased at runtime and cannot be reflected
  * over — the source is the only thing that can be asserted on.
  *
- * Read once, memoized, and re-attempted before failing. An architecture
- * reviewer saw this parse return `[]` exactly once during a full-suite run and
- * the cause was never reproduced (it passed on every subsequent standalone and
- * full run). Rather than assert a root cause that was not established, the
- * read is hardened against the whole class the symptom belongs to: any
- * incomplete or unparseable snapshot is now rejected and retried instead of
- * being silently reduced to an empty array that then fails on a downstream
- * `toContain`. If every attempt fails, the error names the file and what was
- * actually read, so the next occurrence is diagnosable rather than a mystery.
+ * Read once and memoized. An architecture reviewer saw this parse return `[]`
+ * exactly once during a full-suite run and the cause was never reproduced.
+ * Rather than assert a root cause that was not established, the read is
+ * hardened against the whole class the symptom belongs to: any incomplete or
+ * unparseable snapshot is rejected outright instead of being silently reduced
+ * to an empty array that then fails on a downstream `toContain`. When the read
+ * is not trustworthy the error names the file and what was actually read, so
+ * the next occurrence is diagnosable rather than a mystery.
  */
 let cachedLanes: string[] | undefined;
 function parseEvidenceLaneValues(): string[] {
   if (cachedLanes) return cachedLanes;
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const lanes = tryParseEvidenceLaneValues();
-    if (lanes) {
-      cachedLanes = lanes;
-      return lanes;
-    }
+  const lanes = tryParseEvidenceLaneValues();
+  if (lanes) {
+    cachedLanes = lanes;
+    return lanes;
   }
 
   const bytes = fs.existsSync(evidenceLaneSource)
@@ -93,7 +90,7 @@ function parseEvidenceLaneValues(): string[] {
     : -1;
   throw new Error(
     `could not parse a complete 'export type EvidenceLane' union from ` +
-      `${evidenceLaneSource} after 5 reads (file size: ${bytes} bytes). ` +
+      `${evidenceLaneSource} (file size: ${bytes} bytes). ` +
       `This means the file was missing, truncated, or the union's shape ` +
       `changed — not that the union is empty.`,
   );

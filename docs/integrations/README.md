@@ -12,3 +12,4 @@ Sessionless spans and logs are accepted. Crumbtrail auto-creates time-window ses
 | Sentry via OpenTelemetry | [sentry.md](./sentry.md) |
 | Grafana Alloy | [grafana-alloy.md](./grafana-alloy.md) |
 | Splunk Observability Cloud | [splunk.md](./splunk.md) |
+| Database row diffing (Postgres, MySQL, MSSQL, SQLite) | [databases.md](./databases.md) |

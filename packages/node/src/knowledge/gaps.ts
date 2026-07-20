@@ -35,7 +35,7 @@ export const KNOWLEDGE_GAP_LANE = "code" as const;
 /**
  * Why the oracle could not answer. Severity is not encoded per kind at the call
  * site: {@link HARD_FAILURES} holds the single classification, and
- * {@link knowledgeGap} / {@link isHardKnowledgeGap} are the only readers of it.
+ * {@link knowledgeGap} is its only reader.
  */
 export type KnowledgeGapKind =
   | "not-configured"
@@ -89,9 +89,4 @@ export function knowledgeGap(input: KnowledgeGapInput): EvidenceGap {
   if (input.suggestion !== undefined) gap.suggestion = input.suggestion;
   if (HARD_FAILURES.has(input.kind)) gap.kind = "source-unavailable";
   return gap;
-}
-
-/** True when this kind self-degrades from a hard provider failure. */
-export function isHardKnowledgeGap(kind: KnowledgeGapKind): boolean {
-  return HARD_FAILURES.has(kind);
 }

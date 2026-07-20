@@ -7,14 +7,17 @@
  * precisely so that importing it *does* populate the registry. The two barrels
  * behaving differently is the point, and CP4's boundary test pins it.
  *
- * This barrel is the INTERNAL surface and is intentionally wider than the
- * published one. `packages/node/src/index.ts` re-exports a deliberate SUBSET:
- * what an SDK consumer needs to construct a client, call it, and read the
- * result. Helpers that exist for this directory and its tests — `htmlToText`,
- * `capExcerptBytes`, `parseSpaceKeysEnv`, the CQL builders, the gap
- * constructors — stay here. Widening the published surface is a compatibility
- * obligation to npm consumers; widening this one costs nothing, so the two are
- * not kept in sync and should not be.
+ * This barrel is INTERNAL and is deliberately **not** part of the published SDK
+ * surface: `packages/node/src/index.ts` re-exports nothing from `knowledge/`.
+ * Its consumers are inside this package — `mcp-server.ts`, which exposes the
+ * oracle as an MCP tool, and `doctor.ts`, which reports its configuration — plus
+ * this directory's own tests.
+ *
+ * Because nothing here is published, widening this barrel costs nothing and
+ * carries no npm compatibility obligation. Anything that should become a
+ * consumer-facing API has to be re-exported from `packages/node/src/index.ts`
+ * explicitly, and that is the point at which the compatibility obligation
+ * starts.
  *
  * @see docs/specs/2026-07-19-confluence-spec-oracle-design.md
  */
@@ -42,6 +45,7 @@ export {
 
 export {
   buildSpecSearchCql,
+  countDroppedSpaceKeys,
   describeCqlInputLoss,
   MAX_QUERY_LENGTH,
   sanitizeCqlText,
@@ -52,7 +56,6 @@ export {
 } from "./cql";
 
 export {
-  isHardKnowledgeGap,
   knowledgeGap,
   KNOWLEDGE_GAP_LANE,
   type KnowledgeGapInput,

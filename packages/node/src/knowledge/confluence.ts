@@ -46,6 +46,7 @@ import { redactEvidenceGap, redactText } from "../evidence-sources/redact";
 import { CRUMBTRAIL_USER_AGENT } from "../ticket/clients";
 import {
   buildSpecSearchCql,
+  countDroppedSpaceKeys,
   describeCqlInputLoss,
   MAX_QUERY_LENGTH,
   sanitizeSpaceKeys,
@@ -552,10 +553,7 @@ export class ConfluenceKnowledgeClient {
       (config.spaceKeysConfigured === true ||
         (configuredSpaceKeys?.length ?? 0) > 0) &&
       (this.operatorSpaceKeys.length === 0 ||
-        describeCqlInputLoss({
-          query: "allowlist validation",
-          spaceKeys: configuredSpaceKeys,
-        }).droppedSpaceKeys > 0);
+        countDroppedSpaceKeys(configuredSpaceKeys ?? []) > 0);
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_SOURCE_TIMEOUT_MS;
   }

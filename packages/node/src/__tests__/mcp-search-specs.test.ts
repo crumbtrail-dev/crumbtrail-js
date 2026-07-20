@@ -143,21 +143,75 @@ describe("searchSpecs MCP tool", () => {
   it("advertises no credential-shaped input field", async () => {
     const tools = await listTools(serverWith());
     const tool = tools.find((t) => t.name === "searchSpecs");
-    const schemaText = JSON.stringify(tool.inputSchema).toLowerCase();
-    for (const banned of [
+
+    // Matched against FIELD NAMES, at any depth, not against the serialized
+    // schema text. A raw substring scan over the whole JSON also fires on
+    // ordinary prose — "auth" inside "author"/"authoritative", "email" inside a
+    // description — and would report a misleading "credential-shaped field" for
+    // a tool whose result legitimately talks about `lastModifiedBy`.
+    const fieldNames: string[] = [];
+    const collect = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const item of node) collect(item);
+        return;
+      }
+      if (node === null || typeof node !== "object") return;
+      const record = node as Record<string, unknown>;
+      if (
+        record.properties !== null &&
+        typeof record.properties === "object" &&
+        !Array.isArray(record.properties)
+      ) {
+        fieldNames.push(...Object.keys(record.properties));
+      }
+      for (const value of Object.values(record)) collect(value);
+    };
+    collect(tool.inputSchema);
+
+    // Sanity: the walk really found the fields, so "none are credential-shaped"
+    // is not a vacuous statement over an empty list.
+    expect(fieldNames.length).toBeGreaterThan(0);
+
+    // Banned as whole WORDS of the name after splitting camelCase, snake_case,
+    // and kebab-case, so `apiKey` / `api_key` / `apikey`, `authToken`, and
+    // `baseUrl` are all caught while `author`, `authoritative`, and
+    // `lastModifiedBy` are not.
+    const BANNED_WORDS = [
       "token",
       "password",
       "secret",
       "credential",
+      "credentials",
       "apikey",
-      "api_key",
       "auth",
+      // `auth` alone is an exact-word match, so the longer spellings that the
+      // earlier substring scan caught have to be listed explicitly.
+      "authorization",
       "email",
       "baseurl",
-      "base_url",
-    ]) {
-      expect(schemaText).not.toContain(banned);
-    }
+      // `key` is too generic to ban on its own (`spaceKeys` is legitimate), so
+      // ban the credential-bearing compounds instead.
+      "privatekey",
+      "signingkey",
+      "secretkey",
+      "sessionkey",
+      "accesskey",
+    ];
+    const offenders = fieldNames.filter((name) => {
+      const words = name
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((w) => w.length > 0);
+      // Adjacent pairs catch the two-word spellings of the single-token bans
+      // (`api key` → `apikey`, `base url` → `baseurl`).
+      const pairs = words
+        .slice(0, -1)
+        .map((word, i) => `${word}${words[i + 1]}`);
+      const tokens = new Set([...words, ...pairs]);
+      return BANNED_WORDS.some((banned) => tokens.has(banned));
+    });
+    expect(offenders).toEqual([]);
     expect(Object.keys(tool.inputSchema.properties).sort()).toEqual([
       "limit",
       "query",
@@ -196,7 +250,7 @@ describe("searchSpecs MCP tool", () => {
     // The qualifier must be the FIRST thing read, not buried behind capability
     // framing: an agent deciding whether to call sees the opening, and "look up
     // what the system was supposed to do" reads as authority.
-    expect(lower.indexOf("advisory only")).toBeLessThan(40);
+    expect(lower.startsWith("advisory only")).toBe(true);
   });
 
   it("names lastModifiedBy in the description, per the D1 output contract", async () => {

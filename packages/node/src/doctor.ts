@@ -18,7 +18,7 @@ import {
   CONFLUENCE_AUTH_FIELDS,
   CONFLUENCE_BASE_URL_ENV,
   CONFLUENCE_SPACE_KEYS_ENV,
-  describeCqlInputLoss,
+  countDroppedSpaceKeys,
   parseSpaceKeysEnv,
   sanitizeSpaceKeys,
 } from "./knowledge";
@@ -247,10 +247,7 @@ export function checkSpecOracle(
   const configuredSpaceKeys = env[CONFLUENCE_SPACE_KEYS_ENV];
   const parsedSpaceKeys = parseSpaceKeysEnv(configuredSpaceKeys);
   const spaceKeys = sanitizeSpaceKeys(parsedSpaceKeys);
-  const droppedSpaceKeys = describeCqlInputLoss({
-    query: "allowlist validation",
-    spaceKeys: parsedSpaceKeys,
-  }).droppedSpaceKeys;
+  const droppedSpaceKeys = countDroppedSpaceKeys(parsedSpaceKeys);
 
   // Mirror `ConfluenceKnowledgeClient`'s env boundary: an allowlist that is
   // present but empty, malformed, or exceeds the key cap fails closed there,
@@ -275,20 +272,24 @@ export function checkSpecOracle(
   return {
     name: "spec-oracle",
     status: "pass",
-    detail: `Confluence spec oracle configured for ${sanitizeUrl(env[CONFLUENCE_BASE_URL_ENV])} (credentials not verified); ${scope}`,
+    detail: `Confluence spec oracle configured for ${describeBaseUrl(env[CONFLUENCE_BASE_URL_ENV])} (credentials not verified); ${scope}`,
   };
 }
 
-/** Origin + path only, mirroring the client's own URL sanitizer. Keeps any
- *  credential a misconfigured `CONFLUENCE_BASE_URL` might carry in userinfo or
- *  a query string out of the doctor report.
+/** Render a configured base URL as origin + path for the doctor report, keeping
+ *  any credential a misconfigured `CONFLUENCE_BASE_URL` might carry in userinfo
+ *  or a query string out of the output.
  *
- *  Named `sanitizeUrl` to match the six existing private copies
- *  (`evidence-sources/{sentry,splunk,datadog,posthog}.ts`,
- *  `knowledge/confluence.ts`, `ticket/clients.ts`). Local copies are the house
- *  convention here; extracting a shared helper is deliberately out of this
- *  checkpoint's scope, but the name should not diverge on copy seven. */
-function sanitizeUrl(raw: string | undefined): string {
+ *  Deliberately NOT named `sanitizeUrl`, because it is not the same function as
+ *  the six private `sanitizeUrl` copies in
+ *  `evidence-sources/{sentry,splunk,datadog,posthog}.ts`,
+ *  `knowledge/confluence.ts`, and `ticket/clients.ts`. Those take a required
+ *  `string` and fall back to a best-effort URL when parsing fails; this one
+ *  accepts `string | undefined` and returns human prose ("an unset base URL",
+ *  "an unparseable base URL") because its result is interpolated into an
+ *  operator-facing sentence, not used as a URL. Sharing the name would assert a
+ *  drop-in equivalence that does not hold. */
+function describeBaseUrl(raw: string | undefined): string {
   if (!raw) return "an unset base URL";
   try {
     const parsed = new URL(raw);

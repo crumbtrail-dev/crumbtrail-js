@@ -5,7 +5,6 @@ import {
   sanitizeSpaceKeys,
 } from "../knowledge/cql";
 import {
-  isHardKnowledgeGap,
   KNOWLEDGE_GAP_LANE,
   knowledgeGap,
   type KnowledgeGapKind,
@@ -203,7 +202,6 @@ describe("knowledge gap vocabulary", () => {
     it(`marks ${kind} as source-unavailable`, () => {
       const gap = knowledgeGap({ kind, reason: `confluence ${kind}` });
       expect(gap.kind).toBe("source-unavailable");
-      expect(isHardKnowledgeGap(kind)).toBe(true);
     });
   }
 
@@ -212,7 +210,6 @@ describe("knowledge gap vocabulary", () => {
       const gap = knowledgeGap({ kind, reason: `confluence ${kind}` });
       expect(gap.kind).toBeUndefined();
       expect("kind" in gap).toBe(false);
-      expect(isHardKnowledgeGap(kind)).toBe(false);
     });
   }
 
