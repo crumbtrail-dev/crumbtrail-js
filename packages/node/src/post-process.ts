@@ -224,7 +224,20 @@ interface SessionIndex {
   end: number;
   dur: number;
   evts: number;
-  errs: Array<{ t: number; msg: string; method?: string; url?: string }>;
+  errs: Array<{
+    t: number;
+    msg: string;
+    method?: string;
+    url?: string;
+    // Source location of the throw. `file`/`line`/`col` come straight from the
+    // browser ErrorEvent; `stk` is the raw stack, kept because an Error shaped
+    // rejection carries no file/line of its own and its top frame is the only
+    // thing that names one.
+    file?: string;
+    line?: number;
+    col?: number;
+    stk?: string;
+  }>;
   failedReqs: Array<{
     t: number;
     m: string;
@@ -333,6 +346,14 @@ export async function postProcess(
         : undefined;
       if (linked?.m) entry.method = linked.m;
       if (linked?.url) entry.url = linked.url;
+      const file = safeUrl(event.d.file) ?? safePath(event.d.file);
+      if (file) entry.file = file;
+      const line = safeInteger(event.d.line);
+      if (line !== undefined) entry.line = line;
+      const col = safeInteger(event.d.col);
+      if (col !== undefined) entry.col = col;
+      const stk = safeStackString(event.d.stk);
+      if (stk) entry.stk = stk;
       errs.push(entry);
     }
 
@@ -1629,6 +1650,27 @@ function safeDiagnosticString(value: unknown): string | undefined {
   return redactUrlLikeText(
     redactTokenLikeString(trimmed, "diagnostic").value,
   ).slice(0, 200);
+}
+
+/**
+ * Stacks get the same redaction as any other diagnostic string, but not the
+ * 200 character cap: the frame that names the failing file is routinely past
+ * that cut, and truncating it away is exactly the loss this field exists to
+ * prevent. URL redaction preserves paths, so `app-4f2a.js:812:17` survives.
+ */
+function safeStackString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  return redactUrlLikeText(
+    redactTokenLikeString(trimmed, "diagnostic").value,
+  ).slice(0, 2000);
+}
+
+function safeInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  if (!Number.isInteger(value) || value < 0) return undefined;
+  return value;
 }
 
 function redactUrlLikeText(value: string): string {

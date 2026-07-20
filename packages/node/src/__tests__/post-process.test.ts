@@ -2175,6 +2175,58 @@ describe("postProcess", () => {
     expect(index.errs[0].msg).toBe("Promise rejected");
   });
 
+  it("carries the source location of an uncaught error into the index", async () => {
+    const events = [
+      {
+        t: 1000,
+        k: "err",
+        d: {
+          msg: "TypeError: x is undefined",
+          file: "https://app.example.test/assets/app-4f2a.js",
+          line: 812,
+          col: 17,
+          stk: "TypeError: x is undefined\n    at r (https://app.example.test/assets/app-4f2a.js:812:17)",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+    expect(index.errs[0]).toMatchObject({
+      file: "https://app.example.test/assets/app-4f2a.js",
+      line: 812,
+      col: 17,
+    });
+    expect(index.errs[0].stk).toContain("app-4f2a.js:812:17");
+  });
+
+  it("carries the stack of an Error shaped rejection into the index", async () => {
+    const events = [
+      {
+        t: 1000,
+        k: "rej",
+        d: {
+          msg: "Failed to fetch",
+          stk: "TypeError: Failed to fetch\n    at load (https://app.example.test/assets/api-9c1.js:44:9)",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+    expect(index.errs[0].stk).toContain("api-9c1.js:44:9");
+  });
+
   it("handles empty events file", async () => {
     fs.writeFileSync(path.join(tmpDir, "events.ndjson"), "");
     await postProcess(tmpDir);

@@ -134,7 +134,14 @@ export interface EvidenceIndexInput {
       msg?: string;
       source?: string;
     }>;
-    errs?: Array<{ t: number; msg?: string }>;
+    errs?: Array<{
+      t: number;
+      msg?: string;
+      file?: string;
+      line?: number;
+      col?: number;
+      stk?: string;
+    }>;
     navs?: Array<{ t: number; to?: string }>;
     tabBoundaries?: Array<{
       t: number;
@@ -184,7 +191,18 @@ export interface EvidenceCandidate {
     status?: number;
     errorCode?: string;
     message?: string;
+    /**
+     * Free-form provenance label: where this signal came from, not where the
+     * code is. Values include "backend", a transport name, a probe phase. Do
+     * NOT read this as a code location; use `frame`.
+     */
     source?: string;
+    /**
+     * Source location of the failing code as `file:line:col`, when the browser
+     * captured one. Minified unless the app ships readable builds; Crumbtrail
+     * does not resolve source maps today.
+     */
+    frame?: string;
     target?: TargetDescriptor;
   };
   /** Causal role assigned by the confidence-gated re-rank (CP3). Additive/optional. */
@@ -388,6 +406,7 @@ export function buildEvidenceCandidates(
           offsetForEvent(event) ?? offsetFromStart(entry.t, index.start),
         route: routeAt(index.navs ?? [], entry.t),
         message: scrubText(entry.msg, 220),
+        frame: codeFrameOf(entry),
       }),
       // Content-signature dedupe: a repeatedly re-thrown TypeError (same message + route) collapses
       // to one candidate instead of one-per-timestamp. Keep err vs rej distinct (different bug type).
@@ -1359,6 +1378,41 @@ function collectNavigationContext(
 
 function isNavigationEvent(event: BugEvent): boolean {
   return event.k === "nav" || event.k === "navigation";
+}
+
+/**
+ * Matches the location tail of a stack frame: `file:line:col`, in either the V8
+ * (`at fn (URL:12:3)`) or SpiderMonkey (`fn@URL:12:3`) shape. Anchored on the
+ * trailing digits so a bare `https://host/a.js` with no position never matches
+ * and no half-location is reported as a code frame.
+ */
+const STACK_FRAME_LOCATION = /((?:https?:\/\/|\/|[A-Za-z]:\\|\w)[^\s()]*?:\d+:\d+)/;
+
+/**
+ * The `file:line:col` of the failing code, or undefined when the session never
+ * captured one. Prefers the browser's explicit ErrorEvent fields; falls back to
+ * the top frame of the stack, which is the only source a rejection has.
+ *
+ * Returns undefined rather than a partial location: a file with no line sends a
+ * reader to the top of a minified bundle, which is not a starting point.
+ */
+function codeFrameOf(entry: {
+  file?: string;
+  line?: number;
+  col?: number;
+  stk?: string;
+}): string | undefined {
+  if (entry.file && typeof entry.line === "number") {
+    const col = typeof entry.col === "number" ? `:${entry.col}` : "";
+    return safeText(`${entry.file}:${entry.line}${col}`, 300);
+  }
+  if (typeof entry.stk !== "string") return undefined;
+  // Skip the header line ("TypeError: ..."), which can itself contain a URL.
+  for (const line of entry.stk.split("\n").slice(1)) {
+    const match = STACK_FRAME_LOCATION.exec(line);
+    if (match) return safeText(match[1], 300);
+  }
+  return undefined;
 }
 
 // Normalizes an error message into a stable content signature for dedupe: lowercased, redaction
