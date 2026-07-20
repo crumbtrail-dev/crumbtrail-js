@@ -1,0 +1,37 @@
+{
+  "results": [
+    {
+      "id": "1179648",
+      "type": "page",
+      "title": "Checkout retry policy",
+      "space": { "key": "ENG" },
+      "body": {
+        "view": {
+          "value": "<h2>Intended behavior</h2><p>The checkout service retries a failed payment authorization <strong>three</strong> times with exponential backoff.</p><p>A fourth failure is surfaced to the user as <code>PAYMENT_UNAVAILABLE</code>. This is intentional; see the 2025 incident review.</p><script>console.log('nope')</script>"
+        }
+      },
+      "version": {
+        "when": "2026-07-12T09:30:00.000Z",
+        "by": { "displayName": "Dana Okafor" }
+      },
+      "_links": { "webui": "/spaces/ENG/pages/1179648/Checkout+retry+policy" }
+    },
+    {
+      "id": "884736",
+      "type": "page",
+      "title": "Payments architecture decision record 14",
+      "space": { "key": "ARCH" },
+      "body": {
+        "view": {
+          "value": "<p>We chose idempotency keys over request de-duplication at the gateway.</p><ul><li>Keys are client-supplied.</li><li>Keys expire after 24h.</li></ul>"
+        }
+      },
+      "version": {
+        "when": "2024-02-01T17:05:00.000Z",
+        "by": { "displayName": "Sam Ruiz" }
+      },
+      "_links": { "webui": "/spaces/ARCH/pages/884736/ADR+14" }
+    }
+  ],
+  "_links": { "base": "https://acme.atlassian.net/wiki" }
+}

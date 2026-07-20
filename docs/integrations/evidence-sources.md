@@ -67,6 +67,24 @@ Full env-var reference: [`.env.example`](../../.env.example) (the
 `Provider-agnostic adapters` block). Implementation brief:
 [`docs/briefs/evidence-adapters-brief.md`](../briefs/evidence-adapters-brief.md).
 
+### Not on this list: the Confluence spec oracle
+
+Confluence is **deliberately not** one of the adapters above. Every source in
+that table answers *what happened* — it carries a time window and at least one
+correlational join key, and its results are ranked into the bundle. A Confluence
+page answers *what was supposed to happen*: it has neither a time window nor a
+join key, and it must not be ranked alongside telemetry.
+
+So it lives in `packages/node/src/knowledge/`, registers nothing with
+`evidenceSourcesFromEnv`, and never appears in the bundle fan-out. It is reached
+only through the `searchSpecs` tool, and `crumbtrail-server doctor` reports it on
+its own `spec-oracle` line rather than an `evidence-source:*` one.
+
+Adding a seventh row to the table above for it would be a mistake — one the
+adapter framework makes easy and
+`packages/node/src/__tests__/knowledge-boundary.test.ts` exists to fail. See
+[confluence-spec-oracle.md](./confluence-spec-oracle.md).
+
 ### Join-key poverty is the norm
 
 Most stacks do not propagate a W3C `traceparent` end-to-end, so many fetches fall

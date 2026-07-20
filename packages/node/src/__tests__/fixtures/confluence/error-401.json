@@ -1,0 +1,5 @@
+{
+  "statusCode": 401,
+  "data": { "authorized": false, "valid": false, "successful": false },
+  "message": "Current user not permitted to use Confluence"
+}

@@ -69,6 +69,16 @@ import {
   evidenceSourcesFromEnv,
   type EvidenceSource,
 } from "./evidence-sources";
+import {
+  confluenceClientFromEnv,
+  DEFAULT_SPEC_LIMIT,
+  MAX_SPEC_LIMIT,
+  notConfiguredKnowledgeResult,
+  systemClock,
+  unexpectedFailureKnowledgeResult,
+  unusableInputKnowledgeResult,
+  type ConfluenceKnowledgeClient,
+} from "./knowledge";
 
 interface BugEvent {
   t: number;
@@ -122,6 +132,13 @@ export interface McpServerConfig {
    * code leaves this unset and builds them from env via evidenceSourcesFromEnv().
    */
   evidenceSourcesFactory?: () => EvidenceSource[];
+  /**
+   * Test-only seam: overrides how the Confluence spec-oracle client is
+   * constructed for `searchSpecs`. Production code leaves this unset and builds
+   * from env via `confluenceClientFromEnv()`, which returns `undefined` when the
+   * host is not configured — that is a gap-bearing result, not an MCP error.
+   */
+  knowledgeClientFactory?: () => ConfluenceKnowledgeClient | undefined;
 }
 
 /**
@@ -430,6 +447,33 @@ const TOOLS = [
           description: "Max matches to return (default 5, max 20).",
         },
       },
+    },
+  },
+  /** @stability experimental */
+  {
+    name: "searchSpecs",
+    description:
+      "ADVISORY ONLY — returns documentation pages written by people, not observed behavior and not evidence. A page can be stale: written before the code changed, or describing an intent later abandoned. Searches the operator's allowlisted Confluence spaces for what the system was supposed to do. Each excerpt carries a deep link, lastModified, lastModifiedBy, and ageDays (days since the last edit) — weigh ageDays before relying on it. Use a result to annotate a finding, never to close or dismiss one: a page calling a behavior intended is not proof the current behavior is correct, and finding no page is not proof of a bug. Never errors: unconfigured, unreachable, and no-match all return gaps.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "Free-text description of the behavior in question. Keyword-matched against page text, so use the distinctive domain terms rather than a full sentence.",
+        },
+        spaceKeys: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional Confluence space keys to restrict the search to. This can only NARROW the operator's CONFLUENCE_SPACE_KEYS allowlist, never widen it; keys outside the allowlist are not searched and are reported as a gap.",
+        },
+        limit: {
+          type: "number",
+          description: `Max page excerpts to return (default ${DEFAULT_SPEC_LIMIT}, max ${MAX_SPEC_LIMIT}). Clamped server-side.`,
+        },
+      },
+      required: ["query"],
     },
   },
   // Signature resolve / locate surface (act-by-identity, phase 1: resolve-only).
@@ -778,6 +822,7 @@ export class McpServer {
   private outputDir: string;
   private store: McpReadStore;
   private bugQueue: BugQueueManager;
+  private knowledgeClientFactory?: McpServerConfig["knowledgeClientFactory"];
   private gitHostClientFactory?: McpServerConfig["gitHostClientFactory"];
   private ticketConnectorFactory?: McpServerConfig["ticketConnectorFactory"];
   private reproducerFactory?: McpServerConfig["reproducerFactory"];
@@ -793,6 +838,7 @@ export class McpServer {
     this.ticketConnectorFactory = config.ticketConnectorFactory;
     this.reproducerFactory = config.reproducerFactory;
     this.evidenceSourcesFactory = config.evidenceSourcesFactory;
+    this.knowledgeClientFactory = config.knowledgeClientFactory;
   }
 
   /** Evidence sources for solveContext's adapter phase — injected in tests,
@@ -911,6 +957,8 @@ export class McpServer {
         return this.toolGetBug(args);
       case "recallSimilarIssues":
         return this.toolRecallSimilarIssues(args);
+      case "searchSpecs":
+        return this.toolSearchSpecs(args);
       case "resolveSignature":
         return this.toolResolveSignature(args);
       case "locateInteractiveElements":
@@ -2097,6 +2145,90 @@ export class McpServer {
 
     const matches = recallLocal(profile, store, excludeSessionId, limit);
     return textResult({ matches, indexed: true, source: "local" });
+  }
+
+  /**
+   * The Confluence spec oracle (`knowledge.v1`) — injected in tests, built from
+   * env in production. `undefined` means "this host has no Confluence
+   * credentials", which is a reportable gap, not a failure.
+   */
+  private knowledgeClient(): ConfluenceKnowledgeClient | undefined {
+    try {
+      return this.knowledgeClientFactory
+        ? this.knowledgeClientFactory()
+        : confluenceClientFromEnv();
+    } catch {
+      // A throwing factory is indistinguishable, from the caller's side, from a
+      // host that cannot produce a client — and "cannot produce a client" is
+      // already a gap, not an error. Without this, an injected factory (or any
+      // future construction-time validation in confluenceClientFromEnv) turns
+      // into `isError: true` carrying a raw JS message.
+      return undefined;
+    }
+  }
+
+  /**
+   * `searchSpecs` dispatch. Two rules govern this method:
+   *
+   * 1. **It never returns `isError`.** An unconfigured host, an unreachable
+   *    provider, and zero matches are all answers, and "no documented intent was
+   *    found" is a useful one. `notConfiguredKnowledgeResult()` is the single
+   *    implementation of the first case (see `knowledge/confluence.ts`); this
+   *    method must not grow a second one. A missing `query` likewise falls
+   *    through to the client, which gaps with `empty-query`.
+   *
+   *    That rule is ENFORCED here, not merely inherited. `searchSpecs` is
+   *    documented as never rejecting, but this method used to rely on that
+   *    documentation with no `catch` — and the contract had holes (`{results:
+   *    [null]}`, a non-string `title`, a non-string `_links.base`, a row that
+   *    throws on property access), each of which surfaced as `isError: true`
+   *    carrying an unsanitized JS message. Those holes are fixed at the root in
+   *    `confluence.ts`; the guard below exists so the NEXT one degrades instead.
+   *    It deliberately does not interpolate the caught message: `errorGap`
+   *    refuses to reuse transport messages because they can echo the request
+   *    URL, and this layer has even less control over the shape.
+   * 2. **It does not police `spaceKeys`.** The operator allowlist is a ceiling
+   *    enforced in `ConfluenceKnowledgeClient.resolveSpaceKeys`, at the same
+   *    boundary that holds the credential, and denial is reported there as a
+   *    gap. Re-checking it here would either duplicate that invariant or, worse,
+   *    quietly diverge from it. All this does is drop non-string entries from
+   *    agent-supplied JSON so the narrowing logic sees a clean list.
+   */
+  private async toolSearchSpecs(args: Record<string, unknown>) {
+    const client = this.knowledgeClient();
+    if (!client) return textResult(notConfiguredKnowledgeResult());
+
+    // `query` absent is a different answer from `query` present with a type
+    // that cannot mean anything. Collapsing `42` / `null` / `{}` / `true` to ""
+    // reported "empty after sanitization", which tells an agent to rephrase —
+    // so it retries the identical malformed shape. The client's purpose-built
+    // unusable-input gap ("query must be text …") was unreachable from MCP.
+    if (args.query !== undefined && typeof args.query !== "string") {
+      return textResult(unusableInputKnowledgeResult());
+    }
+
+    const spaceKeys = Array.isArray(args.spaceKeys)
+      ? args.spaceKeys.filter((key): key is string => typeof key === "string")
+      : undefined;
+    // Clamped here as well as in the client: this is the untrusted boundary, and
+    // the schema advertises the bounds, so an agent that ignores them is
+    // corrected rather than obeyed. A non-numeric limit reads as "unspecified".
+    const requested = numberField(args.limit);
+    const limit =
+      requested === undefined
+        ? DEFAULT_SPEC_LIMIT
+        : Math.min(MAX_SPEC_LIMIT, Math.max(1, Math.trunc(requested)));
+
+    try {
+      return textResult(
+        await client.searchSpecs(
+          { query: stringField(args.query) ?? "", spaceKeys, limit },
+          systemClock,
+        ),
+      );
+    } catch {
+      return textResult(unexpectedFailureKnowledgeResult());
+    }
   }
 
   /** Adapt this server's storage readers to the recall engine's injected seam.

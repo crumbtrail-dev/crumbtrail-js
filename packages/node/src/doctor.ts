@@ -14,6 +14,14 @@ import {
   type EvidenceSource,
   type SourceHealth,
 } from "./evidence-sources";
+import {
+  CONFLUENCE_AUTH_FIELDS,
+  CONFLUENCE_BASE_URL_ENV,
+  CONFLUENCE_SPACE_KEYS_ENV,
+  countDroppedSpaceKeys,
+  parseSpaceKeysEnv,
+  sanitizeSpaceKeys,
+} from "./knowledge";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -195,6 +203,100 @@ export async function checkEvidenceSources(
     });
   }
   return checks;
+}
+
+/**
+ * Report whether the Confluence spec oracle is configured.
+ *
+ * Deliberately a **separate** check from {@link checkEvidenceSources} rather
+ * than another line inside it. The two lists answer different questions — "what
+ * happened" versus "what was supposed to happen" — and the design rejects
+ * Confluence as a seventh evidence adapter
+ * (`docs/specs/2026-07-19-confluence-spec-oracle-design.md`, "What this is
+ * not"). Merging them in the doctor output would re-blur exactly the boundary
+ * `src/__tests__/knowledge-boundary.test.ts` pins.
+ *
+ * Presence-only: no request is made, so this cannot report auth validity the way
+ * an adapter's `health()` does. `CONFLUENCE_API_TOKEN` is never echoed — only
+ * the base URL's origin+path and valid space-allowlist keys reach the detail
+ * string, and the token is reported as set/unset by inference from the check
+ * passing at all.
+ *
+ * Because `pass` here means "configured" while `checkEvidenceSources` reports
+ * `pass` only after a live authenticated `health()` call — and `cli.ts` renders
+ * both with the same `✓` — the detail says "(credentials not verified)" so the
+ * weaker claim is legible in a report where the two sit side by side.
+ */
+export function checkSpecOracle(
+  env: Record<string, string | undefined> = process.env,
+): DoctorCheck {
+  const missing = CONFLUENCE_AUTH_FIELDS.filter((name) => {
+    const value = env[name];
+    return !(typeof value === "string" && value.length > 0);
+  });
+
+  if (missing.length > 0) {
+    return {
+      name: "spec-oracle",
+      status: "warn",
+      detail: `Confluence spec oracle not configured (missing ${missing.join(", ")})`,
+      remediation: `set ${CONFLUENCE_AUTH_FIELDS.join(", ")} to let \`searchSpecs\` answer "is this intended?" from your Confluence pages; leaving it unset is fully supported and disables only that lookup`,
+    };
+  }
+
+  const configuredSpaceKeys = env[CONFLUENCE_SPACE_KEYS_ENV];
+  const parsedSpaceKeys = parseSpaceKeysEnv(configuredSpaceKeys);
+  const spaceKeys = sanitizeSpaceKeys(parsedSpaceKeys);
+  const droppedSpaceKeys = countDroppedSpaceKeys(parsedSpaceKeys);
+
+  // Mirror `ConfluenceKnowledgeClient`'s env boundary: an allowlist that is
+  // present but empty, malformed, or exceeds the key cap fails closed there,
+  // so doctor must not describe it as an unrestricted configuration.
+  if (
+    configuredSpaceKeys !== undefined &&
+    (spaceKeys.length === 0 || droppedSpaceKeys > 0)
+  ) {
+    return {
+      name: "spec-oracle",
+      status: "warn",
+      detail: `${CONFLUENCE_SPACE_KEYS_ENV} is invalid; Confluence searches are disabled until its allowlist is fixed`,
+      remediation: `set ${CONFLUENCE_SPACE_KEYS_ENV} to a non-empty comma-separated list of alphanumeric or underscore space keys`,
+    };
+  }
+
+  const scope =
+    spaceKeys.length > 0
+      ? `space allowlist: ${spaceKeys.join(", ")}`
+      : `no ${CONFLUENCE_SPACE_KEYS_ENV} allowlist (all readable spaces are in scope)`;
+
+  return {
+    name: "spec-oracle",
+    status: "pass",
+    detail: `Confluence spec oracle configured for ${describeBaseUrl(env[CONFLUENCE_BASE_URL_ENV])} (credentials not verified); ${scope}`,
+  };
+}
+
+/** Render a configured base URL as origin + path for the doctor report, keeping
+ *  any credential a misconfigured `CONFLUENCE_BASE_URL` might carry in userinfo
+ *  or a query string out of the output.
+ *
+ *  Deliberately NOT named `sanitizeUrl`, because it is not the same function as
+ *  the six private `sanitizeUrl` copies in
+ *  `evidence-sources/{sentry,splunk,datadog,posthog}.ts`,
+ *  `knowledge/confluence.ts`, and `ticket/clients.ts`. Those take a required
+ *  `string` and fall back to a best-effort URL when parsing fails; this one
+ *  accepts `string | undefined` and returns human prose ("an unset base URL",
+ *  "an unparseable base URL") because its result is interpolated into an
+ *  operator-facing sentence, not used as a URL. Sharing the name would assert a
+ *  drop-in equivalence that does not hold. */
+function describeBaseUrl(raw: string | undefined): string {
+  if (!raw) return "an unset base URL";
+  try {
+    const parsed = new URL(raw);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "an unparseable base URL";
+  }
 }
 
 export interface ProbeResult {
@@ -677,6 +779,8 @@ export async function runDoctor(
   checks.push(
     ...(await checkEvidenceSources({ sources: evidenceSourcesFromEnv() })),
   );
+  // Separate line, separate list: the spec oracle is not an evidence adapter.
+  checks.push(checkSpecOracle());
 
   return { report: evaluateDoctor(checks), endpoint, startedServer };
 }
