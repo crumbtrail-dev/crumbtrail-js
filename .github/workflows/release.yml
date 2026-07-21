@@ -9,6 +9,10 @@ on:
         description: "Pack only; do not publish"
         type: boolean
         default: true
+      skip_detect_core:
+        description: "Exclude crumbtrail-detect-core from publishing (temporary: until its npm trusted publisher is configured)"
+        type: boolean
+        default: false
 
 jobs:
   publish:
@@ -46,10 +50,18 @@ jobs:
         # --no-git-checks: the build writes dist/, which is gitignored but makes
         # pnpm consider the tree dirty.
         run: |
+          # Build the package selection. detect-core is inlined into the CLI via
+          # tsup noExternal, so excluding it from a publish still ships the CLI's
+          # fix — it only defers publishing the standalone detect-core package.
+          FILTER=(--filter './packages/*')
+          if [ "${{ inputs.skip_detect_core }}" = "true" ]; then
+            FILTER+=(--filter '!crumbtrail-detect-core')
+            echo "skip_detect_core=true — excluding crumbtrail-detect-core from this run."
+          fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            pnpm -r --filter './packages/*' exec npm pack --dry-run
+            pnpm -r "${FILTER[@]}" exec npm pack --dry-run
           else
-            pnpm -r --filter './packages/*' publish --access public --no-git-checks
+            pnpm -r "${FILTER[@]}" publish --access public --no-git-checks
           fi
         env:
           NPM_CONFIG_PROVENANCE: true
