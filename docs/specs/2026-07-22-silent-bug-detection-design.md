@@ -95,7 +95,7 @@ Per-value classification, deny-biased:
 
 | Class | Rule | Output |
 | --- | --- | --- |
-| Always redact | Field-name deny list (the v1 deny patterns in `core/src/evidence.ts`, plus `password`, `token`, `secret`, `auth`, `card`, `cvv`, `ssn`, `email`, `phone`, `address`) or value pattern (email regex, Luhn-passing digits, JWT shape, high-entropy ≥ 24 chars) | `"[REDACTED]"` + shape |
+| Always redact | Field-name deny list (the v1 sensitive-key patterns in `core/src/redaction.ts`, plus `password`, `token`, `secret`, `auth`, `card`, `cvv`, `ssn`, `email`, `phone`, `address`) or value pattern (email regex, Luhn-passing digits, JWT shape, high-entropy ≥ 24 chars) | `"[REDACTED]"` + shape |
 | Keep | Numbers, booleans, nulls; short enum-like strings (≤ 24 chars, single token, alphanumeric/`-_`) not matching any redact rule | verbatim |
 | Unknown | Everything else (long strings, free text) | `"[REDACTED]"` + shape |
 
