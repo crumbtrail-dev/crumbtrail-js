@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  BROWSER_REDACTION_POLICY_V2,
   CAPTURE_GAP_EVENT_KIND,
   DB_DIFF_EVENT_KIND,
   redactTokenLikeString,
@@ -3191,7 +3192,9 @@ function isRedactionMetadata(value: Record<string, unknown>): value is {
   summaries?: unknown[];
 } {
   return (
-    value.policy === BROWSER_REDACTION_POLICY && Array.isArray(value.fields)
+    (value.policy === BROWSER_REDACTION_POLICY ||
+      value.policy === BROWSER_REDACTION_POLICY_V2) &&
+    Array.isArray(value.fields)
   );
 }
 
