@@ -7,12 +7,19 @@ import {
   buildFixContextFromArtifacts,
   FixContextError,
   type FixContext,
+  type FixContextSignal,
 } from "./fix-context";
 import { normalizeAiOpinion } from "./ai-diagnosis";
 import {
   attachTokenEstimate,
+  budgetPlane,
+  BUDGET_SLACK_TOKENS,
   estimateTokens,
-  fillToBudget,
+  fillPlanesWithDropReport,
+  withPlaneValues,
+  type BudgetPlane,
+  type DropReport,
+  type PlaneDropReport,
 } from "./token-estimate";
 import { compareSessions } from "./compare";
 import { buildRegressionContext } from "./compare/regression-context";
@@ -154,8 +161,114 @@ const MAX_TOKENS_SCHEMA = {
   type: "integer" as const,
   minimum: 1,
   description:
-    "Optional response token budget. Estimated as ceil(chars/4) of the serialized JSON. This low cost heuristic can undercount dense content such as non ASCII text, base64, or punctuation, so budget conservatively. When set, lower ranked items are dropped whole from the bottom of the ranking and never rewritten. The response gains tokenEstimate and a dropReport listing what was omitted. Omit it for the full payload.",
+    "Optional response token budget. Estimated as ceil(chars/4) of the serialized JSON. This low cost heuristic can undercount dense content such as non ASCII text, base64, or punctuation, so budget conservatively. When set, every list in the response competes for the same budget in a fixed priority order, highest value first: for getFixContext that is ranked signals, then database evidence, then backend and then frontend request lists. Items are dropped whole from the bottom of each list and are never rewritten. The response gains tokenEstimate, budgetSatisfied, and, when anything was omitted, a dropReport naming each list it trimmed. budgetSatisfied is false when even the fixed fields exceed the budget, and budgetNotice then names a budget that does fit. Omit maxTokens for the full payload.",
 };
+
+/**
+ * Canonical cross plane budget priority for the getFixContext and
+ * getLatestIssue bundle, highest value first. Encoded ONCE so no call site can
+ * quietly leave a plane out of the budget, which is exactly how
+ * `primary_window` used to stay unbudgetable while `signals` absorbed every
+ * drop.
+ *
+ * Order rationale: the ranked signal list is the point of the bundle and the
+ * only plane that names a root cause, so it is spent first. Database evidence
+ * carries the row level state those detectors reason over, with row diffs
+ * before pre state reads before statement only OTel activity. The request
+ * arrays come last: they are the bulkiest plane and the most redundant, since
+ * every kept signal already carries its own anchor and requestId, and backend
+ * request summaries carry the error and route detail that frontend summaries
+ * lack.
+ *
+ * `causal_chain` is deliberately absent. It is a projection over `signals`
+ * rather than an independent list, so `fixContextResult` keeps or drops it
+ * whole based on which signals survived.
+ */
+const FIX_CONTEXT_BUDGET_PLANES: ReadonlyArray<
+  (context: FixContext) => BudgetPlane
+> = [
+  (context) => budgetPlane("signals", context.signals, (signal) => signal.id),
+  (context) =>
+    budgetPlane(
+      "primary_window.db_diffs",
+      context.primary_window.db_diffs,
+      (diff) => `db.diff:${diff.table}@t=${diff.t}`,
+    ),
+  (context) =>
+    budgetPlane(
+      "primary_window.db_reads",
+      context.primary_window.db_reads,
+      (read) => `db.read:${read.table}@t=${read.t}`,
+    ),
+  (context) =>
+    budgetPlane(
+      "primary_window.db_activity",
+      context.primary_window.db_activity,
+      (activity) =>
+        `db.activity:${activity.operation ?? activity.spanName ?? "span"}@t=${activity.t}`,
+    ),
+  (context) =>
+    budgetPlane(
+      "primary_window.backend.requests",
+      context.primary_window.backend.requests,
+      (request) =>
+        requestPlaneRef(request.requestId, request.method, request.url),
+    ),
+  (context) =>
+    budgetPlane(
+      "primary_window.frontend.requests",
+      context.primary_window.frontend.requests,
+      (request) =>
+        requestPlaneRef(request.requestId, request.method, request.url),
+    ),
+];
+
+/**
+ * The causal-chain invariant: a chain that names a signal the budget dropped
+ * would point at evidence the response does not carry, which is worse than no
+ * chain at all. Returns the drop entry when the chain must go, `undefined` when
+ * every signal it names survived the fill.
+ *
+ * Whole-chain, not per-symptom: trimming the symptom list in place would leave
+ * a chain that silently understates the blast radius, and a caller cannot tell
+ * a short chain from a trimmed one.
+ */
+function orphanedChainDrop(
+  context: FixContext,
+  kept: ReadonlyMap<string, unknown[]>,
+): PlaneDropReport | undefined {
+  const chain = context.causal_chain;
+  if (!chain) return undefined;
+  const keptIds = new Set(
+    (kept.get("signals") as FixContextSignal[]).map((signal) => signal.id),
+  );
+  const orphaned = [
+    chain.root.id,
+    ...chain.symptoms.map((symptom) => symptom.id),
+  ].filter((id) => !keptIds.has(id));
+  if (orphaned.length === 0) return undefined;
+  return {
+    plane: "causal_chain",
+    droppedCount: 1,
+    droppedTokenEstimate: estimateTokens(JSON.stringify(chain, null, 2)),
+    droppedRefs: orphaned.slice(0, 10),
+  };
+}
+
+/**
+ * Drop-report ref for a request summary. `requestId` is the join key the
+ * frontend and backend planes share, so it is preferred; method and url are the
+ * honest fallback when correlation never produced an id.
+ */
+function requestPlaneRef(
+  requestId: string | undefined,
+  method: string | undefined,
+  url: string | undefined,
+): string {
+  if (requestId) return `req:${requestId}`;
+  if (method || url) return `req:${method ?? "?"} ${url ?? "?"}`;
+  return "req:unknown";
+}
 
 const TOOLS = [
   /** @stability stable */
@@ -1425,13 +1538,14 @@ export class McpServer {
         returned: contexts.length,
         truncated: false,
       },
-      "contexts",
-      contexts,
+      [budgetPlane("contexts", contexts, (context) => `t=${context.error.t}`)],
       budget.maxTokens,
-      (context) => `t=${context.error.t}`,
-      (kept, out) => {
-        out.returned = kept.length;
-        out.truncated = contexts.length > kept.length;
+      {
+        onKept: (out, kept) => {
+          const keptCount = kept.get("contexts")!.length;
+          out.returned = keptCount;
+          out.truncated = contexts.length > keptCount;
+        },
       },
     );
   }
@@ -1455,20 +1569,24 @@ export class McpServer {
           Array.isArray(index.failedReqs) &&
           index.failedReqs.length > requests.length,
       },
-      "requests",
-      requests,
+      [
+        budgetPlane("requests", requests, (request) =>
+          isRecord(request)
+            ? (stringField(request.id) ??
+              stringField(request.url) ??
+              "failed-request")
+            : "failed-request",
+        ),
+      ],
       budget.maxTokens,
-      (request) =>
-        isRecord(request)
-          ? (stringField(request.id) ??
-            stringField(request.url) ??
-            "failed-request")
-          : "failed-request",
-      (kept, out) => {
-        out.returned = kept.length;
-        out.truncated =
-          Array.isArray(index.failedReqs) &&
-          index.failedReqs.length > kept.length;
+      {
+        onKept: (out, kept) => {
+          const keptCount = kept.get("requests")!.length;
+          out.returned = keptCount;
+          out.truncated =
+            Array.isArray(index.failedReqs) &&
+            index.failedReqs.length > keptCount;
+        },
       },
     );
   }
@@ -1724,13 +1842,18 @@ export class McpServer {
     });
   }
 
-  // --- Token budgeting (CP4) -------------------------------------------------
+  // --- Token budgeting -------------------------------------------------------
   //
   // The unbudgeted paths below are gated on `args.maxTokens === undefined` and
   // are byte-identical to the pre-budgeting responses — budgeting is strictly
   // additive and opt-in for getFixContext / getLatestIssue / solveContext /
   // getWindow. Estimates are always over the exact textResult serialization
   // (JSON.stringify(data, null, 2)).
+  //
+  // Every budgetable array is a "plane". A budgeted response declares its
+  // planes in one explicit priority order and the shared fill spends the budget
+  // top-down, so nothing in the payload is exempt from the budget and the
+  // highest-value plane is never the first casualty.
 
   /** Parses the optional `maxTokens` arg. `{}` when absent; error when invalid. */
   private maxTokensOf(
@@ -1745,55 +1868,102 @@ export class McpServer {
   }
 
   /**
-   * Shared budgeted-response path: fills `payload[itemsKey]` from `items` in
-   * their given rank order via the one shared fillToBudget helper, then
-   * attaches `tokenEstimate` (of the final serialized payload) and, when
-   * anything was dropped, a structured `dropReport`. `onKept` lets a caller
-   * patch dependent fields (e.g. getWindow's returned/truncated) after the
-   * fill. Deterministic; logs drops to stderr only (stdout carries only
+   * Shared budgeted-response path: fills every declared plane from the caller's
+   * priority order via the one shared fill, then attaches `budgetSatisfied`,
+   * `tokenEstimate` (of the final serialized payload) and, when anything was
+   * dropped, a structured `dropReport` naming each trimmed plane.
+   *
+   * `hooks.extraDrops` reports a non-array projection the fill invalidated (see
+   * {@link fillPlanesWithDropReport}); `hooks.onKept` patches dependent fields
+   * once the fill is final (getWindow's returned/truncated, getFixContext's
+   * causal chain).
+   *
+   * `budgetSatisfied` is verified against the FINAL serialization, not against
+   * the fill's own accounting: when a payload's fixed fields alone exceed the
+   * budget no fill can rescue it, and the response says so instead of silently
+   * overrunning. Deterministic; logs drops to stderr only (stdout carries only
    * JSON-RPC frames).
    */
-  private budgetedTextResult<T>(
+  private budgetedTextResult(
     payload: Record<string, unknown>,
-    itemsKey: string,
-    items: T[],
+    planes: BudgetPlane[],
     maxTokens: number,
-    refOf: (item: T) => string,
-    onKept?: (kept: T[], out: Record<string, unknown>) => void,
+    hooks: {
+      extraDrops?: (
+        kept: ReadonlyMap<string, unknown[]>,
+      ) => PlaneDropReport | undefined;
+      onKept?: (
+        out: Record<string, unknown>,
+        kept: ReadonlyMap<string, unknown[]>,
+        report: DropReport | undefined,
+      ) => void;
+    } = {},
   ) {
-    const baseTokens = estimateTokens(
-      JSON.stringify({ ...payload, [itemsKey]: [] }, null, 2),
+    const emptied = withPlaneValues(
+      payload,
+      planes.map((plane) => [plane.path, []] as const),
     );
-    const { kept, report } = fillToBudget(items, {
-      maxTokens,
-      baseTokens,
-      refOf,
-      serialize: (item) => JSON.stringify(item, null, 2),
-    });
-    const out: Record<string, unknown> = { ...payload, [itemsKey]: kept };
-    onKept?.(kept, out);
+    const baseTokens = estimateTokens(JSON.stringify(emptied, null, 2));
+    const { kept, report } = fillPlanesWithDropReport(
+      planes,
+      { maxTokens, baseTokens },
+      hooks.extraDrops,
+    );
+
+    const out = withPlaneValues(payload, kept);
+    hooks.onKept?.(out, kept, report);
     if (report) {
       out.dropReport = report;
       process.stderr.write(
-        `mcp: ${itemsKey} budgeted to maxTokens=${maxTokens}: ${report.message}\n`,
+        `mcp: budgeted to maxTokens=${maxTokens}: ${report.message}\n`,
       );
     }
-    return textResult(attachTokenEstimate(out));
+
+    // Provisionally claim the budget was met, then check the claim against the
+    // real serialization and downgrade it if the fixed fields alone blew past.
+    out.budgetSatisfied = true;
+    let final = attachTokenEstimate(out);
+    if (final.tokenEstimate > maxTokens + BUDGET_SLACK_TOKENS) {
+      out.budgetSatisfied = false;
+      // `final.tokenEstimate` is measured with every budgeted list already
+      // empty, so a budget of that size leaves the response inside its own
+      // slack allowance. Recommending it is a fact about this response, not an
+      // estimate of one.
+      out.budgetNotice = `This response could not be brought within maxTokens=${maxTokens}: its fixed fields alone estimate about ${baseTokens} tokens before any list content, and every budgeted list is already empty. Retry with maxTokens of at least ${final.tokenEstimate}, or read the omitted lists separately with getEvidence and getWindow.`;
+      final = attachTokenEstimate(out);
+      process.stderr.write(
+        `mcp: budget not satisfiable at maxTokens=${maxTokens}: fixed fields alone estimate ~${baseTokens} tokens\n`,
+      );
+    }
+    return textResult(final);
   }
 
   /**
    * Shared response path for getFixContext and getLatestIssue. Unbudgeted
-   * stays byte-identical to the raw contract; budgeted fills `signals` in
-   * detector rank order (refs are signal ids resolvable via getEvidence).
+   * stays byte-identical to the raw contract; budgeted spends the budget across
+   * {@link FIX_CONTEXT_BUDGET_PLANES} in priority order and then enforces the
+   * causal-chain invariant.
+   *
+   * `causal_chain` is a projection over `signals`, not a plane of its own, so it
+   * cannot be trimmed item by item. It is kept only when EVERY signal it names
+   * survived the fill; otherwise it is dropped whole and reported as its own
+   * plane. A chain pointing at a signal that is not in the response would be
+   * worse than no chain at all.
    */
   private fixContextResult(context: FixContext, maxTokens: number | undefined) {
     if (maxTokens === undefined) return textResult(context);
     return this.budgetedTextResult(
       context as unknown as Record<string, unknown>,
-      "signals",
-      context.signals,
+      FIX_CONTEXT_BUDGET_PLANES.map((plane) => plane(context)),
       maxTokens,
-      (candidate) => candidate.id,
+      {
+        extraDrops: (kept) => orphanedChainDrop(context, kept),
+        onKept: (out, _kept, report) => {
+          if (report?.planes.some((plane) => plane.plane === "causal_chain")) {
+            out.causal_chain = null;
+          }
+        },
+      },
     );
   }
 
@@ -1951,11 +2121,14 @@ export class McpServer {
         }
         return this.budgetedTextResult(
           pulled.bundle,
-          "evidence",
-          pulled.bundle.evidence,
+          [
+            budgetPlane("evidence", pulled.bundle.evidence, (item) =>
+              isRecord(item) && typeof item.id === "string"
+                ? item.id
+                : "unknown",
+            ),
+          ],
           budget.maxTokens,
-          (item) =>
-            isRecord(item) && typeof item.id === "string" ? item.id : "unknown",
         );
       }
     }
@@ -2199,10 +2372,8 @@ export class McpServer {
     // EvidenceItem.id values (the same ids opinion.hypotheses reference).
     return this.budgetedTextResult(
       bundle as unknown as Record<string, unknown>,
-      "evidence",
-      bundle.evidence,
+      [budgetPlane("evidence", bundle.evidence, (item) => item.id)],
       budget.maxTokens,
-      (item) => item.id,
     );
   }
 
@@ -2785,13 +2956,14 @@ export class McpServer {
     // first ref is the first omitted event's timestamp for re-windowing.
     return this.budgetedTextResult(
       payload as unknown as Record<string, unknown>,
-      "events",
-      returned,
+      [budgetPlane("events", returned, (event) => `t=${event.t}`)],
       budget.maxTokens,
-      (event) => `t=${event.t}`,
-      (kept, out) => {
-        out.returned = kept.length;
-        out.truncated = matched.length > kept.length;
+      {
+        onKept: (out, kept) => {
+          const keptCount = kept.get("events")!.length;
+          out.returned = keptCount;
+          out.truncated = matched.length > keptCount;
+        },
       },
     );
   }
@@ -3187,13 +3359,14 @@ export class McpServer {
         returned: returned.length,
         truncated: matching.length > returned.length,
       },
-      "events",
-      returned,
+      [budgetPlane("events", returned, (event) => `t=${event.t}`)],
       budget.maxTokens,
-      (event) => `t=${event.t}`,
-      (kept, out) => {
-        out.returned = kept.length;
-        out.truncated = matching.length > kept.length;
+      {
+        onKept: (out, kept) => {
+          const keptCount = kept.get("events")!.length;
+          out.returned = keptCount;
+          out.truncated = matching.length > keptCount;
+        },
       },
     );
   }

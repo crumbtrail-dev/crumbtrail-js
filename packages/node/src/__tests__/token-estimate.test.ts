@@ -2,8 +2,12 @@ import { describe, it, expect } from "vitest";
 import {
   BUDGET_SLACK_TOKENS,
   attachTokenEstimate,
+  budgetPlane,
   estimateTokens,
-  fillToBudget,
+  fillPlanesToBudget,
+  fillPlanesWithDropReport,
+  summarizeDrops,
+  withPlaneValues,
 } from "../token-estimate";
 
 /** A deterministic filler item of roughly `chars` serialized characters. */
@@ -12,6 +16,12 @@ function item(id: string, chars = 200) {
 }
 
 const serialize = (value: unknown) => JSON.stringify(value, null, 2);
+const refOf = (entry: { id: string }) => entry.id;
+
+/** Kept ids for one plane path, for terse assertions. */
+function keptIds(kept: ReadonlyMap<string, unknown[]>, path: string): string[] {
+  return (kept.get(path) as { id: string }[]).map((entry) => entry.id);
+}
 
 describe("estimateTokens", () => {
   it("is Math.ceil(chars / 4)", () => {
@@ -24,139 +34,277 @@ describe("estimateTokens", () => {
   });
 });
 
-describe("fillToBudget", () => {
-  const refOf = (entry: { id: string }) => entry.id;
+describe("withPlaneValues", () => {
+  it("writes nested paths immutably and preserves key order", () => {
+    const payload = {
+      schemaVersion: "test.v1",
+      signals: [1, 2, 3],
+      primary_window: {
+        frontend: { window: null, requests: ["a", "b"] },
+        db_diffs: ["d"],
+      },
+      trailer: true,
+    };
+    const out = withPlaneValues(payload, [
+      ["signals", []],
+      ["primary_window.frontend.requests", ["a"]],
+    ]);
 
-  it("keeps everything (no report) when the budget fits all items", () => {
-    const items = [item("a"), item("b"), item("c")];
-    const { kept, report } = fillToBudget(items, {
-      maxTokens: 100_000,
-      baseTokens: 50,
-      refOf,
-      serialize,
+    expect(out).toEqual({
+      schemaVersion: "test.v1",
+      signals: [],
+      primary_window: {
+        frontend: { window: null, requests: ["a"] },
+        db_diffs: ["d"],
+      },
+      trailer: true,
     });
-    expect(kept).toEqual(items);
-    expect(report).toBeUndefined();
+    // Key order (and therefore the serialized bytes) is untouched.
+    expect(Object.keys(out)).toEqual(Object.keys(payload));
+    expect(
+      Object.keys(
+        (out.primary_window as Record<string, unknown>).frontend as Record<
+          string,
+          unknown
+        >,
+      ),
+    ).toEqual(["window", "requests"]);
+    // The input is not mutated.
+    expect(payload.signals).toEqual([1, 2, 3]);
+    expect(payload.primary_window.frontend.requests).toEqual(["a", "b"]);
+  });
+});
+
+describe("fillPlanesToBudget", () => {
+  it("keeps everything (no drops) when the budget fits all planes", () => {
+    const signals = [item("a"), item("b")];
+    const requests = [item("r1"), item("r2")];
+    const { kept, dropped } = fillPlanesToBudget(
+      [
+        budgetPlane("signals", signals, refOf),
+        budgetPlane("primary_window.frontend.requests", requests, refOf),
+      ],
+      { maxTokens: 100_000, baseTokens: 50 },
+    );
+    expect(kept.get("signals")).toEqual(signals);
+    expect(kept.get("primary_window.frontend.requests")).toEqual(requests);
+    expect(dropped).toEqual([]);
+    expect(summarizeDrops(dropped)).toBeUndefined();
   });
 
-  it("drops strictly from the bottom of the rank order", () => {
+  it("drops strictly from the bottom of a plane's rank order", () => {
     const items = [item("a"), item("b"), item("c"), item("d")];
     const costPerItem = Math.ceil(serialize(items[0]).length / 4);
-    // Budget for roughly two items.
-    const { kept, report } = fillToBudget(items, {
-      maxTokens: 100 + Math.floor(costPerItem * 2.5),
-      baseTokens: 100,
-      refOf,
-      serialize,
-    });
-    expect(kept.map(refOf)).toEqual(["a", "b"]);
-    expect(report!.droppedRefs).toEqual(["c", "d"]);
-    expect(report!.droppedCount).toBe(2);
+    const { kept, dropped } = fillPlanesToBudget(
+      [budgetPlane("signals", items, refOf)],
+      { maxTokens: 100 + Math.floor(costPerItem * 2.5), baseTokens: 100 },
+    );
+    expect(keptIds(kept, "signals")).toEqual(["a", "b"]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0].plane).toBe("signals");
+    expect(dropped[0].droppedRefs).toEqual(["c", "d"]);
+    expect(dropped[0].droppedCount).toBe(2);
   });
 
-  it("never drops a mid-rank item before a lower-ranked one, even when the lower one would fit", () => {
+  it("never drops a mid-rank item before a lower-ranked one in the same plane", () => {
     // b is huge; c is tiny and WOULD fit after a — but the kept set must stay a
     // strict prefix, so once b falls out of budget, c is dropped too.
     const items = [item("a", 100), item("b", 5000), item("c", 20)];
     const budget =
       Math.ceil(serialize(items[0]).length / 4) +
       Math.ceil(serialize(items[2]).length / 4) +
-      60; // fits a + c comfortably, nowhere near b
-    const { kept, report } = fillToBudget(items, {
-      maxTokens: budget,
-      baseTokens: 0,
-      refOf,
-      serialize,
-    });
-    expect(kept.map(refOf)).toEqual(["a"]);
-    expect(report!.droppedRefs).toEqual(["b", "c"]);
+      60;
+    const { kept, dropped } = fillPlanesToBudget(
+      [budgetPlane("signals", items, refOf)],
+      { maxTokens: budget, baseTokens: 0 },
+    );
+    expect(keptIds(kept, "signals")).toEqual(["a"]);
+    expect(dropped[0].droppedRefs).toEqual(["b", "c"]);
   });
 
-  it("reports shape and message for drops", () => {
-    const items = [item("keep"), item("drop_1"), item("drop_2")];
-    // Fits item one (standalone estimate + a small margin for the in-array
-    // overhead), but nowhere near two items.
-    const { report } = fillToBudget(items, {
-      maxTokens: Math.ceil(serialize(items[0]).length / 4) + 20,
-      baseTokens: 0,
-      refOf,
-      serialize,
-    });
-    expect(report).toBeDefined();
-    expect(report!.droppedCount).toBe(2);
-    expect(report!.droppedTokenEstimate).toBeGreaterThan(0);
-    expect(report!.droppedRefs).toEqual(["drop_1", "drop_2"]);
-    expect(report!.message).toMatch(
-      /^omitted 2 items, ~\d+(\.\d+)?k? tokens, refs: drop_1, drop_2$/,
+  it("spends the budget in plane priority order: a bulky low-priority plane never starves signals", () => {
+    // The regression this checkpoint exists for: the request arrays used to be
+    // fixed cost, so `signals` absorbed 100% of the drop.
+    const signals = [item("cand_0001", 200), item("cand_0002", 200)];
+    const requests = Array.from({ length: 10 }, (_, i) =>
+      item(`req_${i}`, 400),
     );
+    const { kept, dropped } = fillPlanesToBudget(
+      [
+        budgetPlane("signals", signals, refOf),
+        budgetPlane("primary_window.frontend.requests", requests, refOf),
+      ],
+      { maxTokens: 300, baseTokens: 40 },
+    );
+    // Signals are served first and survive whole.
+    expect(keptIds(kept, "signals")).toEqual(["cand_0001", "cand_0002"]);
+    // The bulk plane pays for it.
+    expect(
+      keptIds(kept, "primary_window.frontend.requests").length,
+    ).toBeLessThan(requests.length);
+    expect(dropped.map((plane) => plane.plane)).toEqual([
+      "primary_window.frontend.requests",
+    ]);
   });
 
-  it("caps droppedRefs at 10 and marks the message with an ellipsis", () => {
-    const items = Array.from({ length: 16 }, (_, i) =>
-      item(`ref_${String(i).padStart(2, "0")}`),
+  it("is lexicographically monotonic in the budget across planes", () => {
+    const signals = Array.from({ length: 6 }, (_, i) => item(`cand_${i}`, 250));
+    const requests = Array.from({ length: 12 }, (_, i) =>
+      item(`req_${i}`, 300),
     );
-    const { kept, report } = fillToBudget(items, {
-      maxTokens: 1,
-      baseTokens: 0,
-      refOf,
-      serialize,
-    });
-    expect(kept).toEqual([]);
-    expect(report!.droppedCount).toBe(16);
-    expect(report!.droppedRefs).toHaveLength(10);
-    expect(report!.droppedRefs[0]).toBe("ref_00");
-    expect(report!.message).toContain("…");
+    const planes = () => [
+      budgetPlane("signals", signals, refOf),
+      budgetPlane("primary_window.frontend.requests", requests, refOf),
+    ];
+
+    let previous: number[] | undefined;
+    for (const maxTokens of [60, 200, 500, 1200, 3000, 9000, 40_000]) {
+      const { kept } = fillPlanesToBudget(planes(), {
+        maxTokens,
+        baseTokens: 50,
+      });
+      const vector = [
+        kept.get("signals")!.length,
+        kept.get("primary_window.frontend.requests")!.length,
+      ];
+      if (previous) {
+        const firstDiff = vector.findIndex((v, i) => v !== previous![i]);
+        if (firstDiff !== -1) {
+          expect(vector[firstDiff]).toBeGreaterThan(previous[firstDiff]);
+        }
+      }
+      previous = vector;
+    }
+    expect(previous).toEqual([signals.length, requests.length]);
   });
 
   it("keeps nothing (never throws, never loops) when the budget is below even the base", () => {
     const items = [item("a"), item("b")];
-    const { kept, report } = fillToBudget(items, {
-      maxTokens: 1,
-      baseTokens: 500,
-      refOf,
-      serialize,
-    });
-    expect(kept).toEqual([]);
-    expect(report!.droppedCount).toBe(2);
-    expect(report!.droppedRefs).toEqual(["a", "b"]);
+    const { kept, dropped } = fillPlanesToBudget(
+      [budgetPlane("signals", items, refOf)],
+      { maxTokens: 1, baseTokens: 500 },
+    );
+    expect(kept.get("signals")).toEqual([]);
+    expect(dropped[0].droppedCount).toBe(2);
+    expect(dropped[0].droppedRefs).toEqual(["a", "b"]);
   });
 
-  it("returns no report for an empty item list", () => {
-    expect(
-      fillToBudget([], { maxTokens: 1, baseTokens: 999, refOf, serialize }),
-    ).toEqual({ kept: [] });
+  it("records a kept entry for every requested plane, even empty ones", () => {
+    const { kept, dropped } = fillPlanesToBudget(
+      [
+        budgetPlane("signals", [], refOf),
+        budgetPlane("primary_window.db_diffs", [], refOf),
+      ],
+      { maxTokens: 1, baseTokens: 999 },
+    );
+    expect([...kept.keys()]).toEqual(["signals", "primary_window.db_diffs"]);
+    expect(dropped).toEqual([]);
   });
+
+  it("charges a nested plane for its deeper indentation", () => {
+    const items = [item("a", 400)];
+    const shallow = fillPlanesToBudget([budgetPlane("signals", items, refOf)], {
+      maxTokens: 1_000_000,
+      baseTokens: 0,
+    }).usedTokens;
+    const deep = fillPlanesToBudget(
+      [budgetPlane("primary_window.frontend.requests", items, refOf)],
+      { maxTokens: 1_000_000, baseTokens: 0 },
+    ).usedTokens;
+    expect(deep).toBeGreaterThan(shallow);
+  });
+});
+
+describe("summarizeDrops", () => {
+  it("names every trimmed plane, totals the drops, and caps refs at 10", () => {
+    const signals = Array.from({ length: 12 }, (_, i) =>
+      item(`cand_${String(i).padStart(4, "0")}`),
+    );
+    const requests = [item("req_0"), item("req_1")];
+    const { dropped } = fillPlanesToBudget(
+      [
+        budgetPlane("signals", signals, refOf),
+        budgetPlane("primary_window.backend.requests", requests, refOf),
+      ],
+      { maxTokens: 1, baseTokens: 0 },
+    );
+    const report = summarizeDrops(dropped)!;
+
+    expect(report.planes.map((plane) => plane.plane)).toEqual([
+      "signals",
+      "primary_window.backend.requests",
+    ]);
+    expect(report.droppedCount).toBe(14);
+    expect(report.droppedRefs).toHaveLength(10);
+    expect(report.droppedRefs[0]).toBe("cand_0000");
+    expect(report.message).toMatch(/^omitted 14 items, ~/);
+    expect(report.message).toContain("signals");
+    expect(report.message).toContain("primary_window.backend.requests");
+    expect(report.message).toContain("…");
+    expect(report.droppedTokenEstimate).toBeGreaterThan(0);
+  });
+
+  it("returns undefined when no plane lost anything", () => {
+    expect(summarizeDrops([])).toBeUndefined();
+  });
+
+  it("uses the singular noun for a single dropped item", () => {
+    const { dropped } = fillPlanesToBudget(
+      [budgetPlane("signals", [item("only")], refOf)],
+      { maxTokens: 1, baseTokens: 0 },
+    );
+    expect(summarizeDrops(dropped)!.message).toMatch(
+      /^omitted 1 item, ~\d+(\.\d+)?k? tokens from signals; refs: only$/,
+    );
+  });
+});
+
+describe("fillPlanesWithDropReport", () => {
+  const signals = Array.from({ length: 20 }, (_, i) =>
+    item(`cand_${String(i).padStart(4, "0")}`, 300),
+  );
+  const requests = Array.from({ length: 20 }, (_, i) =>
+    item(`req_${String(i).padStart(4, "0")}`, 300),
+  );
+  const payload: Record<string, unknown> = {
+    schemaVersion: "test.v1",
+    header: "h".repeat(120),
+    signals,
+    primary_window: { frontend: { requests } },
+  };
+  const planes = () => [
+    budgetPlane("signals", signals, refOf),
+    budgetPlane("primary_window.frontend.requests", requests, refOf),
+  ];
+  const baseTokens = estimateTokens(
+    JSON.stringify(
+      withPlaneValues(payload, [
+        ["signals", []],
+        ["primary_window.frontend.requests", []],
+      ]),
+      null,
+      2,
+    ),
+  );
 
   it("keeps the final serialized response within maxTokens + BUDGET_SLACK_TOKENS", () => {
-    // Simulate the exact MCP assembly: payload with an item array under a
-    // top-level key, base measured with the array emptied, fill, then attach
-    // dropReport + tokenEstimate and measure the true final serialization.
-    const items = Array.from({ length: 30 }, (_, i) =>
-      item(`cand_${String(i).padStart(4, "0")}`, 300),
-    );
-    const payload: Record<string, unknown> = {
-      schemaVersion: "test.v1",
-      header: "h".repeat(120),
-      ranked: items,
-    };
-    const baseTokens = estimateTokens(
-      JSON.stringify({ ...payload, ranked: [] }, null, 2),
-    );
-
+    // Simulate the exact MCP assembly: base measured with every plane emptied,
+    // fill, then attach dropReport + budgetSatisfied + tokenEstimate and
+    // measure the truth over the real serialization.
     for (const maxTokens of [
       baseTokens + 50,
       baseTokens + 400,
       baseTokens + 1200,
+      baseTokens + 4000,
       estimateTokens(JSON.stringify(payload, null, 2)) + 100,
     ]) {
-      const { kept, report } = fillToBudget(items, {
+      const { kept, report } = fillPlanesWithDropReport(planes(), {
         maxTokens,
         baseTokens,
-        refOf,
-        serialize,
       });
-      const out: Record<string, unknown> = { ...payload, ranked: kept };
+      const out = withPlaneValues(payload, kept);
       if (report) out.dropReport = report;
+      out.budgetSatisfied = true;
       const final = attachTokenEstimate(out);
       const finalText = JSON.stringify(final, null, 2);
       expect(estimateTokens(finalText)).toBeLessThanOrEqual(
@@ -164,6 +312,45 @@ describe("fillToBudget", () => {
       );
       expect(final.tokenEstimate).toBe(estimateTokens(finalText));
     }
+  });
+
+  it("reserves the drop report's own cost out of the budget, not out of the slack", () => {
+    const maxTokens = baseTokens + 1200;
+    const unreserved = fillPlanesToBudget(planes(), { maxTokens, baseTokens });
+    const reserved = fillPlanesWithDropReport(planes(), {
+      maxTokens,
+      baseTokens,
+    });
+    expect(reserved.reservedTokens).toBeGreaterThan(0);
+    expect(reserved.kept.get("signals")!.length).toBeLessThanOrEqual(
+      unreserved.kept.get("signals")!.length,
+    );
+  });
+
+  it("folds an extra non-array drop into the report", () => {
+    const { report } = fillPlanesWithDropReport(
+      planes(),
+      { maxTokens: baseTokens + 400, baseTokens },
+      () => ({
+        plane: "causal_chain",
+        droppedCount: 1,
+        droppedTokenEstimate: 42,
+        droppedRefs: ["cand_0019"],
+      }),
+    );
+    expect(report!.planes.map((plane) => plane.plane)).toContain(
+      "causal_chain",
+    );
+  });
+
+  it("reserves nothing when the whole payload fits", () => {
+    const outcome = fillPlanesWithDropReport(planes(), {
+      maxTokens: 1_000_000,
+      baseTokens,
+    });
+    expect(outcome.report).toBeUndefined();
+    expect(outcome.reservedTokens).toBe(0);
+    expect(outcome.kept.get("signals")).toEqual(signals);
   });
 });
 
