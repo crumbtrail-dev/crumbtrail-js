@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-import { execFile as execFileCallback } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import {
   createReleasePlan,
   declaredWorkspaceDependencies,
@@ -15,8 +14,23 @@ import {
   writePlan,
 } from "./release-plan.mjs";
 
-const execFile = promisify(execFileCallback);
 const rootDir = path.resolve(import.meta.dirname, "../..");
+
+// execFile always pipes; it has no stdio option, so passing `stdio: "inherit"`
+// to it silently does nothing. A piped child has no TTY, and npm two-factor
+// publishes need one to prompt for the one-time password, which fails as
+// ERR_PNPM_OTP_NON_INTERACTIVE. Use spawn so pnpm inherits this terminal.
+function run(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "inherit", ...options });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (code === 0) return resolve();
+      const detail = signal ? `signal ${signal}` : `exit code ${code}`;
+      reject(new Error(`${command} ${args.join(" ")} failed with ${detail}`));
+    });
+  });
+}
 
 function readOption(name) {
   const index = process.argv.indexOf(name);
@@ -47,7 +61,7 @@ async function packReleaseArtifacts(packages) {
   const artifacts = [];
   for (const pkg of packages) {
     const before = new Set(await fs.readdir(artifactsDir));
-    await execFile("pnpm", ["--dir", path.join(rootDir, pkg.relativeDir), "pack", "--pack-destination", artifactsDir], { stdio: "inherit" });
+    await run("pnpm", ["--dir", path.join(rootDir, pkg.relativeDir), "pack", "--pack-destination", artifactsDir]);
     const createdTarballs = (await fs.readdir(artifactsDir))
       .filter((entry) => entry.endsWith(".tgz") && !before.has(entry));
     if (createdTarballs.length !== 1) {
@@ -77,9 +91,8 @@ if (mode === "dry-run") {
   const result = await preflightAndPublishArtifacts(orderedArtifacts, {
     lookupIntegrity: npmPackageIntegrity,
     publish: async (artifact) => {
-      await execFile("pnpm", ["publish", artifact.tarballPath, "--access", "public", "--no-git-checks"], {
+      await run("pnpm", ["publish", artifact.tarballPath, "--access", "public", "--no-git-checks"], {
         cwd: rootDir,
-        stdio: "inherit",
       });
     },
   });
