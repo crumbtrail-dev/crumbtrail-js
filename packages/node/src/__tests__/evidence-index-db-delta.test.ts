@@ -334,6 +334,35 @@ describe("buildEvidenceCandidates — db_delta_mismatch", () => {
     ).toBe(true);
   });
 
+  it("correlates on d.requestId when the browser event also carries a numeric transport id", () => {
+    // Real browser net.req events carry BOTH a transport-local counter (d.id)
+    // and the propagated correlation id (d.requestId); db.diff only knows the
+    // latter. Regression guard: correlation must run on d.requestId.
+    const events: BugEvent[] = [
+      {
+        t: 1000,
+        k: "net.req",
+        d: {
+          id: 7,
+          method: "POST",
+          url: "/api/checkout",
+          requestId: "64fa03fc359eaafc6ba95043615399f4",
+          body: JSON.stringify({
+            userId: 1,
+            couponCode: null,
+            total: 23319,
+            items: [{ productId: 7, qty: 1 }],
+          }),
+        },
+      },
+      invDiff(1050, "64fa03fc359eaafc6ba95043615399f4", 25, 23),
+    ];
+    const candidates = buildEvidenceCandidates(events, { start: 1000 });
+    const cand = candidates.find((c) => c.detector === "db_delta_mismatch");
+    expect(cand).toBeDefined();
+    expect(cand!.anchor.requestId).toBe("64fa03fc359eaafc6ba95043615399f4");
+  });
+
   it("nets out compensated writes via the signed delta sum", () => {
     const events: BugEvent[] = [
       netReq(1000, "r1", { productId: 7, qty: 0 }),

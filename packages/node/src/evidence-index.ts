@@ -1368,9 +1368,13 @@ function collectMutatingRequests(
   events: BugEvent[],
 ): Map<string, CorrelatedRequest> {
   const requests = new Map<string, CorrelatedRequest>();
+  // db.diff correlation runs on the propagated correlation id (d.requestId),
+  // not the transport-local counter (d.id) — browser events carry both and the
+  // counter never matches a diff. Legacy fixtures without d.requestId fall back
+  // to the transport id so old sessions keep whatever correlation they had.
   for (const event of events) {
     if (event.k !== "net.req") continue;
-    const id = requestIdForEvent(event);
+    const id = safeText(event.d.requestId, 120) ?? requestIdForEvent(event);
     if (!id) continue;
     const method = (
       safeText(event.d.m, 20) ??
@@ -1388,7 +1392,7 @@ function collectMutatingRequests(
   }
   for (const event of events) {
     if (event.k !== "net.res") continue;
-    const id = requestIdForEvent(event);
+    const id = safeText(event.d.requestId, 120) ?? requestIdForEvent(event);
     if (!id) continue;
     const entry = requests.get(id);
     if (!entry) continue;
