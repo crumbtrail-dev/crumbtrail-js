@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { buildFixContext, type FixContext } from "./fix-context";
+import { defaultSessionStore } from "./session-store";
 
 export interface AiDiagnosisConfig {
   enabled: boolean;
@@ -103,7 +104,7 @@ export async function runAiDiagnosis(
   if (!apiKey) return { ok: true, skipped: "missing_key" };
 
   try {
-    const context = buildFixContext(sessionDir);
+    const context = await buildFixContext(sessionDir);
     if (context.signals.length === 0)
       return { ok: true, skipped: "no_candidates" };
 
@@ -153,7 +154,7 @@ export async function runAiDiagnosis(
         error: "OpenRouter response did not include content",
       };
     const opinion = normalizeAiOpinion(JSON.parse(content));
-    writeOpinionArtifacts(sessionDir, {
+    await writeOpinionArtifacts(sessionDir, {
       opinionJson: `${JSON.stringify(opinion, null, 2)}\n`,
       opinionMarkdown: renderOpinionMarkdown(opinion),
       auditJson: `${JSON.stringify(
@@ -312,10 +313,10 @@ interface OpinionArtifacts {
  * run will regenerate, never an opinion that is treated as complete without
  * its audit.
  */
-function writeOpinionArtifacts(
+async function writeOpinionArtifacts(
   sessionDir: string,
   artifacts: OpinionArtifacts,
-): void {
+): Promise<void> {
   const names = ["opinion.audit.json", "opinion.md", "opinion.json"] as const;
   const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
   const temporary = new Map(
@@ -326,17 +327,17 @@ function writeOpinionArtifacts(
   if (!hasOpinionArtifacts(sessionDir)) removeIncompleteOpinionArtifacts(sessionDir, names);
 
   try {
-    writeSessionFileNoSymlink(
+    await writeSessionFileNoSymlink(
       sessionDir,
       temporary.get("opinion.audit.json")!,
       artifacts.auditJson,
     );
-    writeSessionFileNoSymlink(
+    await writeSessionFileNoSymlink(
       sessionDir,
       temporary.get("opinion.md")!,
       artifacts.opinionMarkdown,
     );
-    writeSessionFileNoSymlink(
+    await writeSessionFileNoSymlink(
       sessionDir,
       temporary.get("opinion.json")!,
       artifacts.opinionJson,
@@ -402,13 +403,16 @@ function removeIncompleteOpinionArtifacts(
   }
 }
 
-function writeSessionFileNoSymlink(
+// Routed through the SessionStore seam so a storage decorator (the hosted
+// cloud's at-rest encryption) sees the opinion artifacts. The symlink assertion
+// stays here because it also guards the staged temporary names.
+async function writeSessionFileNoSymlink(
   sessionDir: string,
   name: string,
   data: string,
-): void {
+): Promise<void> {
   assertSafeOpinionArtifactPaths(sessionDir, [name]);
-  fs.writeFileSync(path.join(sessionDir, name), data);
+  await defaultSessionStore.writeArtifact(sessionDir, name, data);
 }
 
 function errorMessage(err: unknown): string {

@@ -268,7 +268,7 @@ describe("runAiDiagnosis", () => {
     const providerPrompt = userPromptFromRequest(requestBody);
     const providerBundle = evidenceBundleFromPrompt(providerPrompt);
     const audit = readAudit(tmpDir);
-    expect(providerBundle).toEqual(buildFixContext(tmpDir));
+    expect(providerBundle).toEqual(await buildFixContext(tmpDir));
     expect(providerBundle.signals).toHaveLength(45);
     expect(providerBundle.signals[44]).toMatchObject({
       id: "cand_0045",
@@ -309,7 +309,7 @@ describe("runAiDiagnosis", () => {
     });
     expect(cappedAudit.reduction.dropped.length).toBeGreaterThan(0);
     expect(evidenceBundleFromPrompt(cappedPrompt)).not.toEqual(
-      buildFixContext(tmpDir),
+      await buildFixContext(tmpDir),
     );
   });
 
@@ -601,7 +601,7 @@ function userPromptFromRequest(requestBody: string): string {
 
 function evidenceBundleFromPrompt(
   prompt: string,
-): ReturnType<typeof buildFixContext> {
+): Awaited<ReturnType<typeof buildFixContext>> {
   const marker = "\n\nEvidence bundle:\n";
   const start = prompt.indexOf(marker);
   if (start < 0) throw new Error("provider prompt is missing the evidence bundle");

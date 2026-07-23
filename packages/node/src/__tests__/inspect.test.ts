@@ -71,7 +71,7 @@ async function seedSession(outputDir: string): Promise<string> {
   return sessionDir;
 }
 
-describe("inspectSession", () => {
+describe("inspectSession", async () => {
   let tmpDir: string;
   let sessionDir: string;
 
@@ -80,12 +80,12 @@ describe("inspectSession", () => {
     sessionDir = await seedSession(tmpDir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("summarizes the session from the manifest with core counts", () => {
-    const summary = inspectSession(sessionDir);
+  it("summarizes the session from the manifest with core counts", async () => {
+    const summary = await inspectSession(sessionDir);
     expect(summary.id).toBe(SESSION_ID);
     expect(summary.source).toBe("manifest");
     expect(summary.durationMs).toBe(600);
@@ -95,8 +95,8 @@ describe("inspectSession", () => {
     expect(typeof summary.candidateCount).toBe("number");
   });
 
-  it("lists artifacts present on disk with byte sizes and never the raw events.ndjson", () => {
-    const summary = inspectSession(sessionDir);
+  it("lists artifacts present on disk with byte sizes and never the raw events.ndjson", async () => {
+    const summary = await inspectSession(sessionDir);
     expect(summary.artifacts.length).toBeGreaterThan(0);
     const names = summary.artifacts.map((a) => a.name);
     expect(names).toContain("manifest.json");
@@ -107,42 +107,42 @@ describe("inspectSession", () => {
     }
   });
 
-  it("falls back to index.json when no manifest is present", () => {
+  it("falls back to index.json when no manifest is present", async () => {
     fs.rmSync(path.join(sessionDir, "manifest.json"));
-    const summary = inspectSession(sessionDir);
+    const summary = await inspectSession(sessionDir);
     expect(summary.source).toBe("index");
     expect(summary.id).toBe(SESSION_ID);
     expect(summary.eventCount).toBeGreaterThan(0);
     expect(summary.artifacts.map((a) => a.name)).not.toContain("events.ndjson");
   });
 
-  it("resolves a bare session id against outputDir", () => {
-    const summary = inspectSession(SESSION_ID, { outputDir: tmpDir });
+  it("resolves a bare session id against outputDir", async () => {
+    const summary = await inspectSession(SESSION_ID, { outputDir: tmpDir });
     expect(summary.id).toBe(SESSION_ID);
   });
 
-  it("throws InspectError when neither manifest nor index exists", () => {
-    expect(() => inspectSession("nope", { outputDir: tmpDir })).toThrowError(
-      InspectError,
-    );
+  it("throws InspectError when neither manifest nor index exists", async () => {
+    await expect(
+      inspectSession("nope", { outputDir: tmpDir }),
+    ).rejects.toThrowError(InspectError);
   });
 
-  it("renders a human summary including artifacts", () => {
-    const out = formatInspection(inspectSession(sessionDir));
+  it("renders a human summary including artifacts", async () => {
+    const out = formatInspection(await inspectSession(sessionDir));
     expect(out).toContain("crumbtrail-server inspect");
     expect(out).toContain(SESSION_ID);
     expect(out).toContain("Artifacts");
     expect(out).toContain("manifest.json");
   });
 
-  it("surfaces the bundle's detect-to-bundle latency stamp from llm.json", () => {
+  it("surfaces the bundle's detect-to-bundle latency stamp from llm.json", async () => {
     const llm = JSON.parse(
       fs.readFileSync(path.join(sessionDir, "llm.json"), "utf-8"),
     );
     // The seeded session has a failed request, so post-processing stamped the bundle.
     expect(typeof llm.detectToBundleMs).toBe("number");
 
-    const summary = inspectSession(sessionDir);
+    const summary = await inspectSession(sessionDir);
     expect(summary.firstErrorEventAt).toBe(llm.firstErrorEventAt);
     expect(summary.detectToBundleMs).toBe(llm.detectToBundleMs);
     expect(summary.detectToBundleMs).toBeGreaterThanOrEqual(0);
@@ -151,9 +151,9 @@ describe("inspectSession", () => {
     expect(out).toContain(`Detect→bundle: ${llm.detectToBundleMs} ms`);
   });
 
-  it("omits latency fields and the human latency line when llm.json has no stamp", () => {
+  it("omits latency fields and the human latency line when llm.json has no stamp", async () => {
     fs.rmSync(path.join(sessionDir, "llm.json"));
-    const summary = inspectSession(sessionDir);
+    const summary = await inspectSession(sessionDir);
     expect(summary).not.toHaveProperty("firstErrorEventAt");
     expect(summary).not.toHaveProperty("detectToBundleMs");
     expect(formatInspection(summary)).not.toContain("Detect→bundle");

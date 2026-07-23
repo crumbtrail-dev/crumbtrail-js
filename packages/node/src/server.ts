@@ -21,6 +21,7 @@ import {
   scheduleAiDiagnosis,
   type AiDiagnosisConfig,
 } from "./ai-diagnosis";
+import { defaultSessionStore } from "./session-store";
 import { startSessionSweeper } from "./session-sweeper";
 import { startFastFinalizer, type FastFinalizeHandle } from "./fast-finalize";
 import { buildHealthPayload, buildPublicHealthPayload } from "./health";
@@ -562,12 +563,12 @@ function requireObjectBody(body: unknown): Record<string, unknown> {
   return body;
 }
 
-function getExistingSessionDirOrThrow(
+async function getExistingSessionDirOrThrow(
   sessions: SessionManager,
   sessionId: unknown,
-): string {
+): Promise<string> {
   try {
-    const sessionDir = sessions.getExistingSessionDir(
+    const sessionDir = await sessions.getExistingSessionDir(
       typeof sessionId === "string" ? sessionId : "",
     );
     if (!sessionDir) {
@@ -698,11 +699,11 @@ function sessionArtifactNames(sessionDir: string): string[] {
   ].filter((name) => name !== "events.ndjson" || !hasColdEvents);
 }
 
-function serveSessionArtifact(
+async function serveSessionArtifact(
   res: http.ServerResponse,
   sessionDir: string,
   artifactName: string,
-): void {
+): Promise<void> {
   const allowed = new Set([
     "opinion.md",
     "opinion.json",
@@ -747,9 +748,10 @@ function serveSessionArtifact(
     return;
   }
 
-  const artifactPath = windowsMatch
-    ? path.join(sessionDir, "windows", windowsMatch[1])
-    : path.join(sessionDir, artifactName);
+  const storeName = windowsMatch
+    ? `windows/${windowsMatch[1]}`
+    : artifactName;
+  const artifactPath = path.join(sessionDir, storeName);
   const safePath = safeRegularFilePath(sessionDir, artifactPath);
   if (!safePath) {
     jsonError(res, 404, "Not found", "not_found", false);
@@ -757,7 +759,15 @@ function serveSessionArtifact(
   }
 
   const mime = MIME_TYPES[path.extname(safePath)] ?? "text/plain";
-  const data = fs.readFileSync(safePath);
+  // Read through the SessionStore seam, not fs: when an embedder decorates
+  // storage (the hosted cloud's at-rest envelope encryption) the bytes on disk
+  // are an envelope, and serving them raw would hand ciphertext to the
+  // dashboard under a text/json content type.
+  const data = await defaultSessionStore.readArtifact(sessionDir, storeName);
+  if (!data) {
+    jsonError(res, 404, "Not found", "not_found", false);
+    return;
+  }
   const contentType =
     mime.startsWith("text/") ||
     mime === "application/json" ||
@@ -1054,12 +1064,12 @@ function validateTargetDescriptor(
   }
 }
 
-function writeAudioUploadMetadata(
+async function writeAudioUploadMetadata(
   req: http.IncomingMessage,
   sessionDir: string,
   name: string,
   data: Buffer,
-): void {
+): Promise<void> {
   if (name !== AUDIO_ARTIFACT_NAME) return;
 
   const metadata = parseUploadMetadata(req);
@@ -1085,7 +1095,11 @@ function writeAudioUploadMetadata(
 
   const metadataPath = path.join(sessionDir, AUDIO_METADATA_NAME);
   assertWritableArtifactPath(sessionDir, metadataPath);
-  fs.writeFileSync(metadataPath, JSON.stringify(audioMetadata, null, 2));
+  await defaultSessionStore.writeArtifact(
+    sessionDir,
+    AUDIO_METADATA_NAME,
+    JSON.stringify(audioMetadata, null, 2),
+  );
 }
 
 function parseUploadMetadata(req: http.IncomingMessage): {
@@ -1272,7 +1286,7 @@ function buildOtlpAutoSessionMetadata(
   });
 }
 
-function ingestOtelEvents(
+async function ingestOtelEvents(
   sessions: SessionManager,
   events: BugEvent[],
   maxSessionEventBytes: number,
@@ -1285,7 +1299,11 @@ function ingestOtelEvents(
      */
     onIngested?: (sessionId: string, events: BugEvent[]) => void;
   },
-): { ingested: number; skipped: number; truncatedSessions?: number } {
+): Promise<{
+  ingested: number;
+  skipped: number;
+  truncatedSessions?: number;
+}> {
   let ingested = 0;
   let skipped = 0;
   let truncatedSessions = 0;
@@ -1310,17 +1328,17 @@ function ingestOtelEvents(
   }
   for (const [sessionId, list] of bySession) {
     try {
-      let dir = sessions.getExistingSessionDir(sessionId);
+      let dir = await sessions.getExistingSessionDir(sessionId);
       if (!dir) {
-        sessions.create(
+        await sessions.create(
           sessionId,
           autoSessions.has(sessionId)
             ? buildOtlpAutoSessionMetadata(sessionId, list)
             : { source: "otlp" },
         );
-        dir = sessions.getSessionDir(sessionId);
+        dir = await sessions.getSessionDir(sessionId);
       }
-      const result = appendEvents(dir, list, {
+      const result = await appendEvents(dir, list, {
         maxEventBytes: maxSessionEventBytes,
       });
       ingested += result.accepted;
@@ -1379,11 +1397,22 @@ export function createServer(config: ServerConfig): http.Server {
   // Post-finalize side effect shared by the idle sweeper and the fast
   // finalizer: schedule the AI opinion pass when opted in. The session dir is
   // resolved at call time because finalize moves the directory.
+  // Kept SYNCHRONOUS on purpose: onBackgroundFinalized is invoked from the
+  // sweeper inside a plain try/catch, which cannot catch a rejected promise.
+  // Resolving the (now async) session dir is therefore fired off here with its
+  // own catch, so a failed lookup degrades to "no AI pass" instead of an
+  // unhandled rejection, and the emit that follows still runs in order.
   const scheduleSessionAiDiagnosis = (sessionId: string): void => {
     if (!config.ai?.enabled) return;
-    const sessionDir = sessions.getExistingSessionDir(sessionId);
-    if (sessionDir)
-      scheduleAiDiagnosis(sessionDir, config.ai as AiDiagnosisConfig);
+    void sessions
+      .getExistingSessionDir(sessionId)
+      .then((sessionDir) => {
+        if (sessionDir)
+          scheduleAiDiagnosis(sessionDir, config.ai as AiDiagnosisConfig);
+      })
+      .catch(() => {
+        // Best-effort: never break the finalize callback chain.
+      });
   };
 
   // Throw-safe wrapper for config.onSessionFinalized: an embedder hook
@@ -1498,7 +1527,7 @@ export function createServer(config: ServerConfig): http.Server {
           );
           return;
         }
-        json(res, 200, sessions.listSummaries());
+        json(res, 200, await sessions.listSummaries());
         return;
       }
 
@@ -1519,13 +1548,16 @@ export function createServer(config: ServerConfig): http.Server {
         if (!requireAuthorized(req, res, config.authToken)) return;
 
         const sessionId = decodeURIComponent(sessionPageMatch[1]);
-        const sessionDir = getExistingSessionDirOrThrow(sessions, sessionId);
+        const sessionDir = await getExistingSessionDirOrThrow(
+          sessions,
+          sessionId,
+        );
 
         const artifactName = sessionPageMatch[2]
           ? decodeURIComponent(sessionPageMatch[2])
           : undefined;
         if (artifactName) {
-          serveSessionArtifact(res, sessionDir, artifactName);
+          await serveSessionArtifact(res, sessionDir, artifactName);
           return;
         }
 
@@ -1551,7 +1583,7 @@ export function createServer(config: ServerConfig): http.Server {
           await readJsonBody(req, maxJsonBodyBytes),
         );
         try {
-          sessions.create(
+          await sessions.create(
             String(body.sessionId ?? ""),
             isRecord(body.metadata) ? body.metadata : {},
           );
@@ -1588,12 +1620,14 @@ export function createServer(config: ServerConfig): http.Server {
         );
         try {
           const sessionId = String(body.sessionId ?? "");
-          getExistingSessionDirOrThrow(sessions, sessionId);
+          await getExistingSessionDirOrThrow(sessions, sessionId);
           const finalization = await sessions.finalize(sessionId);
           // Explicit /api/session/end is always a first finalization from the
           // hook's perspective; emitted before the response is written.
           emitSessionFinalized(finalization.sessionId, false);
-          const sessionDir = sessions.getSessionDir(finalization.sessionId);
+          const sessionDir = await sessions.getSessionDir(
+            finalization.sessionId,
+          );
           const response = {
             ...finalization,
             ...sessionLocation(
@@ -1661,7 +1695,7 @@ export function createServer(config: ServerConfig): http.Server {
           );
           return;
         }
-        const sessionDir = getExistingSessionDirOrThrow(
+        const sessionDir = await getExistingSessionDirOrThrow(
           sessions,
           body.sessionId,
         );
@@ -1681,7 +1715,7 @@ export function createServer(config: ServerConfig): http.Server {
           }
           throw err;
         }
-        const append = appendEvents(sessionDir, validatedEvents, {
+        const append = await appendEvents(sessionDir, validatedEvents, {
           maxEventBytes: maxSessionEventBytes,
         });
         // Fast-finalize hook, after the successful append only. notifyIngest
@@ -1811,7 +1845,7 @@ export function createServer(config: ServerConfig): http.Server {
           );
           return;
         }
-        const result = ingestOtelEvents(
+        const result = await ingestOtelEvents(
           sessions,
           events,
           maxSessionEventBytes,
@@ -1838,14 +1872,14 @@ export function createServer(config: ServerConfig): http.Server {
           return;
         }
         const sessionId = req.headers["x-session-id"];
-        const sessionDir = getExistingSessionDirOrThrow(
+        const sessionDir = await getExistingSessionDirOrThrow(
           sessions,
           Array.isArray(sessionId) ? sessionId[0] : sessionId,
         );
         const data = await readBody(req, maxBlobBytes);
         assertWritableArtifactPath(sessionDir, path.join(sessionDir, name));
-        writeBlob(sessionDir, name, data);
-        writeAudioUploadMetadata(req, sessionDir, name, data);
+        await writeBlob(sessionDir, name, data);
+        await writeAudioUploadMetadata(req, sessionDir, name, data);
         json(res, 200, { ok: true });
         return;
       }
@@ -2053,43 +2087,36 @@ export function createServer(config: ServerConfig): http.Server {
   }
 
   if (config.ai?.enabled && config.ai.backfillOnStart) {
-    const sessionDirs = sessions
-      .listSummaries()
-      .map((summary) => sessions.getExistingSessionDir(summary.id))
-      .filter((dir): dir is string => dir !== undefined);
     const timer = setTimeout(() => {
-      void backfillAiDiagnoses(
-        sessionDirs,
-        config.ai as AiDiagnosisConfig,
-      ).then((result) =>
+      // Session-dir resolution moved inside the timer because listSummaries /
+      // getExistingSessionDir are now async. Resolved serially so one bad
+      // session cannot reorder or abort the rest.
+      void (async () => {
+        const sessionDirs: string[] = [];
+        for (const summary of await sessions.listSummaries()) {
+          try {
+            const dir = await sessions.getExistingSessionDir(summary.id);
+            if (dir !== undefined) sessionDirs.push(dir);
+          } catch {
+            // Skip a session whose id no longer resolves; backfill is advisory.
+          }
+        }
+        const result = await backfillAiDiagnoses(
+          sessionDirs,
+          config.ai as AiDiagnosisConfig,
+        );
         config.ai?.log?.(
           `Crumbtrail AI opinion backfill complete: ${JSON.stringify(result)}`,
-        ),
-      );
+        );
+      })().catch(() => {
+        // Backfill is best-effort and must never crash the server.
+      });
     }, 0);
     server.on("close", () => clearTimeout(timer));
   }
 
   if (fastFinalizer) {
     server.on("close", () => fastFinalizer.stop());
-  }
-
-  if (config.ai?.enabled && config.ai.backfillOnStart) {
-    const sessionDirs = sessions
-      .listSummaries()
-      .map((summary) => sessions.getExistingSessionDir(summary.id))
-      .filter((dir): dir is string => dir !== undefined);
-    const timer = setTimeout(() => {
-      void backfillAiDiagnoses(
-        sessionDirs,
-        config.ai as AiDiagnosisConfig,
-      ).then((result) =>
-        config.ai?.log?.(
-          `Crumbtrail AI opinion backfill complete: ${JSON.stringify(result)}`,
-        ),
-      );
-    }, 0);
-    server.on("close", () => clearTimeout(timer));
   }
 
   return server;

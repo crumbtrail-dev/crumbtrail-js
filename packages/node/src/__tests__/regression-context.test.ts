@@ -121,11 +121,11 @@ afterEach(() => {
 });
 
 describe("buildRegressionContext", () => {
-  it("wraps a comparison in regression-context.v1 with grounded interaction, window, and db rows", () => {
+  it("wraps a comparison in regression-context.v1 with grounded interaction, window, and db rows", async () => {
     const root = makeRoot();
     const bDir = writeSession(root, "sess-b", 1399);
 
-    const context = buildRegressionContext(comparison, bDir);
+    const context = await buildRegressionContext(comparison, bDir);
 
     expect(context.schemaVersion).toBe(REGRESSION_CONTEXT_SCHEMA_VERSION);
     expect(context.comparison).toBe(comparison);
@@ -151,7 +151,7 @@ describe("buildRegressionContext", () => {
     ]);
   });
 
-  it("surfaces the env delta channel and a release-named title", () => {
+  it("surfaces the env delta channel and a release-named title", async () => {
     const root = makeRoot();
     const bDir = writeSession(root, "sess-b", 1399);
 
@@ -170,7 +170,7 @@ describe("buildRegressionContext", () => {
       },
     };
 
-    const context = buildRegressionContext(withEnv, bDir);
+    const context = await buildRegressionContext(withEnv, bDir);
 
     expect(context.title).toBe("R181 vs R182");
     expect(context.env_delta).toEqual(withEnv.envDelta);

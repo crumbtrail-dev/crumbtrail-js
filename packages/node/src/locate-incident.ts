@@ -166,12 +166,12 @@ export function symptomProfile(symptom: Symptom): LocalIssueProfile {
 /** Most recent known activity time for a candidate session, or undefined. Reads
  *  index.json (start/end ms) first, then the bundle's session.startMs/endMs.
  *  Prefers the session END (closest to when the incident finished). */
-function candidateSessionTime(
+async function candidateSessionTime(
   dir: string,
   store: RecallStore,
   bundle: Record<string, unknown>,
-): number | undefined {
-  const index = store.readJsonRecord(dir, "index.json");
+): Promise<number | undefined> {
+  const index = await store.readJsonRecord(dir, "index.json");
   const indexEnd = numberField(index?.end);
   const indexStart = numberField(index?.start);
   if (indexEnd !== undefined) return indexEnd;
@@ -182,8 +182,11 @@ function candidateSessionTime(
 
 /** Release recorded for a candidate session, mirroring firstString usage in
  *  mcp-server.ts (release / releaseId / version from meta.json). */
-function candidateRelease(dir: string, store: RecallStore): string | undefined {
-  const meta = store.readJsonRecord(dir, "meta.json");
+async function candidateRelease(
+  dir: string,
+  store: RecallStore,
+): Promise<string | undefined> {
+  const meta = await store.readJsonRecord(dir, "meta.json");
   if (!meta) return undefined;
   return firstString(meta, ["release", "releaseId", "version"]);
 }
@@ -194,12 +197,12 @@ function candidateRelease(dir: string, store: RecallStore): string | undefined {
  * records. Absence is intentionally preserved as unknown rather than treated
  * as a mismatch by account narrowing.
  */
-function candidateAccountId(
+async function candidateAccountId(
   dir: string,
   store: RecallStore,
-): string | undefined {
+): Promise<string | undefined> {
   for (const name of ["meta.json", "index.json"]) {
-    const record = store.readJsonRecord(dir, name);
+    const record = await store.readJsonRecord(dir, name);
     if (!record) continue;
     const direct = firstString(record, ["accountId", "account_id"]);
     if (direct) return direct;
@@ -235,11 +238,11 @@ function clamp01(value: number): number {
  * scored candidates (base signal > 0) ranked deterministically, even when the
  * outcome is "inconclusive", so near-misses stay visible but are never promoted.
  */
-export function locateIncident(
+export async function locateIncident(
   symptom: Symptom,
   store: RecallStore,
   opts: LocateIncidentOptions = {},
-): LocateIncidentResult {
+): Promise<LocateIncidentResult> {
   const now = opts.now ?? Date.now();
   const threshold = opts.threshold ?? DEFAULT_MATCH_THRESHOLD;
   const margin = opts.margin ?? DEFAULT_MATCH_MARGIN;
@@ -247,12 +250,12 @@ export function locateIncident(
   const symptomRelease = symptom.release?.trim();
 
   const candidates: RankedCandidate[] = [];
-  for (const { id, dir } of store.listSessions()) {
+  for (const { id, dir } of await store.listSessions()) {
     const bundle =
-      store.readJsonRecord(dir, "llm.json") ??
-      store.readJsonRecord(dir, "bundle.json") ??
+      (await store.readJsonRecord(dir, "llm.json")) ??
+      (await store.readJsonRecord(dir, "bundle.json")) ??
       {};
-    const candidateAccount = candidateAccountId(dir, store);
+    const candidateAccount = await candidateAccountId(dir, store);
     if (
       opts.accountId !== undefined &&
       candidateAccount !== undefined &&
@@ -260,9 +263,9 @@ export function locateIncident(
     ) {
       continue;
     }
-    const sessionTime = candidateSessionTime(dir, store, bundle);
-    const release = candidateRelease(dir, store);
-    for (const raw of store.readDistinctBugs(dir)) {
+    const sessionTime = await candidateSessionTime(dir, store, bundle);
+    const release = await candidateRelease(dir, store);
+    for (const raw of await store.readDistinctBugs(dir)) {
       if (!store.isDistinctBugRecord(raw)) continue;
       const bug = raw as unknown as DistinctBug;
       const base = scoreLocalIssue(query, bugProfile(bug, bundle));
@@ -467,12 +470,12 @@ function projectCandidates(
  * session evidence. This is the exact locate → evidence slice toolSolveContext
  * used inline; it is factored here so the inner endpoint shares it.
  */
-export function locateEvidence(
+export async function locateEvidence(
   symptom: Symptom,
   store: RecallStore,
   opts: LocateIncidentOptions = {},
-): { evidence: EvidenceItem[]; match: LocateMatch } {
-  const located = locateIncident(symptom, store, opts);
+): Promise<{ evidence: EvidenceItem[]; match: LocateMatch }> {
+  const located = await locateIncident(symptom, store, opts);
   const top = located.candidates[0];
   if (located.outcome === "matched" && top) {
     return {
@@ -695,7 +698,7 @@ export async function locateAndAssemble(
   match: LocateMatch;
   sources: EvidenceSourceHealth[];
 }> {
-  const located = locateEvidence(symptom, store, opts);
+  const located = await locateEvidence(symptom, store, opts);
   const adapter = await gatherAdapterEvidence(symptom, located, opts);
   const evidence = [...located.evidence, ...adapter.items];
   // A no-session locate ALWAYS states that no Crumbtrail session matched —

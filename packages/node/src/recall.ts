@@ -16,12 +16,13 @@ import { defaultSessionStore } from "./session-store";
  * fake to exercise ranking/dedup/limit without any real MCP server or files.
  */
 export interface RecallStore {
-  listSessions(): Array<{ id: string; dir: string }>;
+  listSessions(): Promise<Array<{ id: string; dir: string }>>;
   readJsonRecord(
     dir: string,
     name: string,
-  ): Record<string, unknown> | undefined;
-  readDistinctBugs(dir: string): unknown[];
+  ): Promise<Record<string, unknown> | undefined>;
+  readDistinctBugs(dir: string): Promise<unknown[]>;
+  /** Pure structural guard — no IO, so it stays synchronous. */
   isDistinctBugRecord(x: unknown): boolean;
 }
 
@@ -147,44 +148,42 @@ export function bugProfile(
 }
 
 /** Build a recall query profile from a session's strongest distinct bug. */
-export function sessionIssueProfile(
+export async function sessionIssueProfile(
   dir: string,
   store: RecallStore,
-): LocalIssueProfile | undefined {
-  const bugs = store
-    .readDistinctBugs(dir)
-    .filter((bug) =>
-      store.isDistinctBugRecord(bug),
-    ) as unknown as DistinctBug[];
+): Promise<LocalIssueProfile | undefined> {
+  const bugs = (await store.readDistinctBugs(dir)).filter((bug) =>
+    store.isDistinctBugRecord(bug),
+  ) as unknown as DistinctBug[];
   if (bugs.length === 0) return undefined;
   const seed = strongestBug(bugs);
   const bundle =
-    store.readJsonRecord(dir, "llm.json") ??
-    store.readJsonRecord(dir, "bundle.json") ??
+    (await store.readJsonRecord(dir, "llm.json")) ??
+    (await store.readJsonRecord(dir, "bundle.json")) ??
     {};
   return bugProfile(seed, bundle);
 }
 
 /** Scan the local session store and rank every distinct bug against the query. */
-export function recallLocal(
+export async function recallLocal(
   query: LocalIssueProfile,
   store: RecallStore,
   excludeSessionId: string | undefined,
   limit: number,
-): Record<string, unknown>[] {
+): Promise<Record<string, unknown>[]> {
   const scored: Array<{
     score: number;
     reasons: string[];
     signature: string | undefined;
     match: Record<string, unknown>;
   }> = [];
-  for (const { id, dir } of store.listSessions()) {
+  for (const { id, dir } of await store.listSessions()) {
     if (excludeSessionId && id === excludeSessionId) continue;
     const bundle =
-      store.readJsonRecord(dir, "llm.json") ??
-      store.readJsonRecord(dir, "bundle.json") ??
+      (await store.readJsonRecord(dir, "llm.json")) ??
+      (await store.readJsonRecord(dir, "bundle.json")) ??
       {};
-    for (const raw of store.readDistinctBugs(dir)) {
+    for (const raw of await store.readDistinctBugs(dir)) {
       if (!store.isDistinctBugRecord(raw)) continue;
       const bug = raw as unknown as DistinctBug;
       const candidate = bugProfile(bug, bundle);
@@ -236,12 +235,12 @@ export function recallLocal(
 
 /** Read + JSON-parse a single named artifact from a session dir, or undefined
  *  when it is absent or not a JSON object. Never throws. */
-export function readSessionJsonRecord(
+export async function readSessionJsonRecord(
   dir: string,
   name: string,
-): Record<string, unknown> | undefined {
+): Promise<Record<string, unknown> | undefined> {
   try {
-    const buf = defaultSessionStore.readArtifact(dir, name);
+    const buf = await defaultSessionStore.readArtifact(dir, name);
     if (!buf) return undefined;
     const parsed: unknown = JSON.parse(buf.toString("utf-8"));
     return isRecord(parsed) ? parsed : undefined;
@@ -252,12 +251,12 @@ export function readSessionJsonRecord(
 
 /** Read the grouped distinct bugs from a session's finalized hot-plane bundle
  *  (llm.json, else bundle.json). Returns [] when absent. */
-export function readSessionDistinctBugs(
+export async function readSessionDistinctBugs(
   dir: string,
-): Record<string, unknown>[] {
+): Promise<Record<string, unknown>[]> {
   const bundle =
-    readSessionJsonRecord(dir, "llm.json") ??
-    readSessionJsonRecord(dir, "bundle.json");
+    (await readSessionJsonRecord(dir, "llm.json")) ??
+    (await readSessionJsonRecord(dir, "bundle.json"));
   return Array.isArray(bundle?.distinctBugs)
     ? bundle!.distinctBugs.filter(isRecord)
     : [];

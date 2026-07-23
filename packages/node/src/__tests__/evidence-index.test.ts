@@ -18,7 +18,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("renders redaction-safe timeline and search rows for mixed page evidence including performance and storage", () => {
+  it("renders redaction-safe timeline and search rows for mixed page evidence including performance and storage", async () => {
     const secret = "sk_fake_abcdefghijklmnopqrstuvwxyz";
     const embeddedSecret = `auth_${secret}`;
     const events = [
@@ -85,7 +85,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       },
     ];
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -156,7 +156,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(serialized).not.toContain("/reset/abcd");
   });
 
-  it("uses planned target descriptor fields in repeated-click candidates and artifacts", () => {
+  it("uses planned target descriptor fields in repeated-click candidates and artifacts", async () => {
     const target: TargetDescriptor = {
       role: "button",
       label: "Submit order",
@@ -200,7 +200,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       },
     ];
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -239,7 +239,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     ).toContain("click Submit order");
   });
 
-  it("renders capped redaction-safe tab boundary timeline and gap candidates", () => {
+  it("renders capped redaction-safe tab boundary timeline and gap candidates", async () => {
     const secret = "sk_fake_abcdefghijklmnopqrstuvwxyz";
     const events = [
       {
@@ -313,7 +313,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       },
     ];
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -359,7 +359,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(serialized).not.toContain("card=");
   });
 
-  it("keeps an HTTP error anchor and its request-response pair above boot noise", () => {
+  it("keeps an HTTP error anchor and its request-response pair above boot noise", async () => {
     const bootNoise: BugEvent[] = Array.from({ length: 125 }, (_, index) => ({
       t: index * 56,
       k: ["stor", "cookie", "perf", "hb"][index % 4],
@@ -392,7 +392,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       },
     ];
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -436,7 +436,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(lowSignalLines.length).toBeGreaterThan(18);
   });
 
-  it("keeps a rejection anchor when another event shares its timestamp", () => {
+  it("keeps a rejection anchor when another event shares its timestamp", async () => {
     const anchorTime = 10_000;
     const events: BugEvent[] = [
       ...Array.from({ length: 36 }, (_, index) => ({
@@ -459,7 +459,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       })),
     ];
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -485,7 +485,65 @@ describe("evidence-index mixed page evidence artifacts", () => {
     );
   });
 
-  it("renders every event in a non-overflowing window despite per-kind quotas", () => {
+  it("carries the correlated request identity onto a rejection anchor", async () => {
+    const anchorTime = 10_000;
+    const events: BugEvent[] = [
+      {
+        t: anchorTime - 5,
+        k: "net.err",
+        offsetMs: anchorTime - 5,
+        d: {
+          id: 4,
+          method: "POST",
+          url: "/api/pay",
+          msg: "Failed to fetch",
+          transport: "fetch",
+        },
+      },
+      {
+        t: anchorTime,
+        k: "rej",
+        offsetMs: anchorTime,
+        d: { msg: "TypeError: Failed to fetch" },
+      },
+    ];
+
+    const candidates = await writeEvidenceIndex({
+      sessionDir: tmpDir,
+      events,
+      index: {
+        id: "ses_rejection_correlated",
+        start: anchorTime - 5,
+        end: anchorTime,
+        dur: 5,
+        // The errs entry inherited the shared network id/method/url in
+        // post-process; the anchor must surface it.
+        errs: [
+          {
+            t: anchorTime,
+            msg: "TypeError: Failed to fetch",
+            requestId: 4,
+            method: "POST",
+            url: "/api/pay",
+          },
+        ],
+      },
+    });
+
+    const candidate = candidates.find(
+      (entry) => entry.detector === "unhandled_rejection",
+    );
+    expect(candidate).toBeDefined();
+    expect(candidate!.anchor).toEqual(
+      expect.objectContaining({
+        requestId: "4",
+        method: "POST",
+        url: "/api/pay",
+      }),
+    );
+  });
+
+  it("renders every event in a non-overflowing window despite per-kind quotas", async () => {
     const anchorTime = 10_000;
     const events: BugEvent[] = [
       ...Array.from({ length: 40 }, (_, index) => ({
@@ -508,7 +566,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       },
     ];
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -536,7 +594,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(compactTimeline).toContain("navigation to /context-19");
   });
 
-  it("caps repeated-click evidence candidates to prevent quadratic finalization growth", () => {
+  it("caps repeated-click evidence candidates to prevent quadratic finalization growth", async () => {
     const events = Array.from({ length: 900 }, (_, index) => ({
       t: 10_000 + index * 10,
       k: "clk",
@@ -544,7 +602,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
       d: { el: { tag: "BUTTON", txt: `Button ${Math.floor(index / 3)}` } },
     }));
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {
@@ -561,8 +619,8 @@ describe("evidence-index mixed page evidence artifacts", () => {
     ).toBe(true);
   });
 
-  it("drops malformed event shells instead of crashing artifact generation", () => {
-    const candidates = writeEvidenceIndex({
+  it("drops malformed event shells instead of crashing artifact generation", async () => {
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events: [
         { t: "bad", k: "net.res", d: null },
@@ -593,7 +651,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
     expect(search).toContain("response status unknown");
   });
 
-  it("omits failed-request body snippets when id-less same-ms responses are ambiguous", () => {
+  it("omits failed-request body snippets when id-less same-ms responses are ambiguous", async () => {
     const responseTime = 14_000;
     const events: BugEvent[] = [
       {
@@ -607,7 +665,7 @@ describe("evidence-index mixed page evidence artifacts", () => {
         d: { st: 500, body: "unrelated-response-two" },
       },
     ];
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index: {

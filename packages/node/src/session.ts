@@ -49,11 +49,22 @@ export interface SessionFinalizationResult {
 const STAGING_SESSION_DIR = ".sessions";
 const PRIVATE_DIR_MODE = 0o700;
 
-function ensurePrivateDirectory(dir: string): void {
+async function ensurePrivateDirectory(dir: string): Promise<void> {
   // mkdir 0700 (+ chmod) lives behind the storage seam so directory creation is a
   // single primitive the R2 adapter can reinterpret. Behaviour-identical to the prior
   // inline mkdirSync/chmodSync.
-  defaultSessionStore.createSessionDir(dir);
+  await defaultSessionStore.createSessionDir(dir);
+}
+
+// The constructor cannot await, and the output ROOT is a container directory that
+// never holds session artifact bytes (so no encrypt/decrypt seam applies to it).
+// It is therefore created directly with the exact 0700 semantics
+// FilesystemSessionStore.createSessionDir applies.
+function ensureOutputRootSync(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (process.platform !== "win32") {
+    fs.chmodSync(dir, PRIVATE_DIR_MODE);
+  }
 }
 
 export class SessionManager {
@@ -73,10 +84,13 @@ export class SessionManager {
       this.whisperModel = config.whisperModel;
       this.postProcess = config.postProcess ?? defaultPostProcess;
     }
-    ensurePrivateDirectory(this.outputDir);
+    ensureOutputRootSync(this.outputDir);
   }
 
-  create(sessionId: string, metadata: Record<string, unknown>): void {
+  async create(
+    sessionId: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
     this.validateSessionId(sessionId);
     const sessionDir = this.resolveStagingSessionDir(sessionId);
     const {
@@ -92,7 +106,10 @@ export class SessionManager {
       this.assertSafeSessionDir(sessionDir);
       let existing: Record<string, unknown> | undefined;
       try {
-        const raw = defaultSessionStore.readArtifact(sessionDir, "meta.json");
+        const raw = await defaultSessionStore.readArtifact(
+          sessionDir,
+          "meta.json",
+        );
         if (raw) {
           existing = JSON.parse(raw.toString("utf-8"));
           if (typeof existing?.start === "number") start = existing.start;
@@ -103,28 +120,28 @@ export class SessionManager {
       if (existing && !isSameSessionMetadata(existing, safeMetadata)) {
         throw new Error("Session already exists");
       }
-    } else if (this.findExistingSessionDir(sessionId)) {
+    } else if (await this.findExistingSessionDir(sessionId)) {
       throw new Error("Session already exists");
     }
-    ensurePrivateDirectory(sessionDir);
+    await ensurePrivateDirectory(sessionDir);
     this.assertSafeSessionDir(sessionDir);
-    ensurePrivateDirectory(path.join(sessionDir, "frames"));
+    await ensurePrivateDirectory(path.join(sessionDir, "frames"));
     const meta = { ...safeMetadata, id: sessionId, start };
-    this.writeSessionArtifact(
+    await this.writeSessionArtifact(
       sessionDir,
       "meta.json",
       JSON.stringify(meta, null, 2),
     );
   }
 
-  getSessionDir(sessionId: string): string {
+  async getSessionDir(sessionId: string): Promise<string> {
     this.validateSessionId(sessionId);
-    const existing = this.findExistingSessionDir(sessionId);
+    const existing = await this.findExistingSessionDir(sessionId);
     if (existing) return existing;
     return this.resolveStagingSessionDir(sessionId);
   }
 
-  getExistingSessionDir(sessionId: string): string | undefined {
+  async getExistingSessionDir(sessionId: string): Promise<string | undefined> {
     this.validateSessionId(sessionId);
     const stagedSessionDir = this.resolveStagingSessionDir(sessionId);
     if (this.isSessionDir(stagedSessionDir)) {
@@ -192,7 +209,9 @@ export class SessionManager {
     }
   }
 
-  private findExistingSessionDir(sessionId: string): string | undefined {
+  private async findExistingSessionDir(
+    sessionId: string,
+  ): Promise<string | undefined> {
     const stagedSessionDir = this.resolveStagingSessionDir(sessionId);
     if (this.isSessionDir(stagedSessionDir)) {
       this.assertSafeSessionDir(stagedSessionDir);
@@ -206,7 +225,7 @@ export class SessionManager {
     }
 
     let found: string | undefined;
-    this.eachSessionDir((id, sessionDir) => {
+    await this.eachSessionDir((id, sessionDir) => {
       if (found) return;
       if (id !== sessionId) return;
       found = sessionDir;
@@ -214,11 +233,11 @@ export class SessionManager {
     return found;
   }
 
-  private moveSessionToV2Partition(
+  private async moveSessionToV2Partition(
     sessionDir: string,
     sessionId: string,
     meta: Record<string, unknown>,
-  ): string {
+  ): Promise<string> {
     const partition = buildSessionPartition(meta, sessionId);
     const segments = [
       partition.tenant,
@@ -239,8 +258,8 @@ export class SessionManager {
         `Session ${sessionId}: partition target is inside the source session`,
       );
     }
-    this.ensurePartitionParent(segments.slice(0, -1));
-    defaultSessionStore.moveToPartition(sessionDir, targetDir);
+    await this.ensurePartitionParent(segments.slice(0, -1));
+    await defaultSessionStore.moveToPartition(sessionDir, targetDir);
     this.assertSafeSessionDir(targetDir);
     return targetDir;
   }
@@ -249,11 +268,14 @@ export class SessionManager {
     sessionId: string,
     options?: { refinalize?: boolean },
   ): Promise<SessionFinalizationResult> {
-    let sessionDir = this.getExistingSessionDir(sessionId);
+    let sessionDir = await this.getExistingSessionDir(sessionId);
     if (!sessionDir) throw new Error(`Session ${sessionId}: not found`);
     let meta: Record<string, unknown>;
     try {
-      const raw = defaultSessionStore.readArtifact(sessionDir, "meta.json");
+      const raw = await defaultSessionStore.readArtifact(
+        sessionDir,
+        "meta.json",
+      );
       if (!raw) throw new Error("missing");
       meta = JSON.parse(raw.toString("utf-8"));
     } catch {
@@ -276,7 +298,11 @@ export class SessionManager {
     }
 
     const finalizedAt = Date.now();
-    sessionDir = this.moveSessionToV2Partition(sessionDir, sessionId, meta);
+    sessionDir = await this.moveSessionToV2Partition(
+      sessionDir,
+      sessionId,
+      meta,
+    );
     this.assertNoSymlinkedGeneratedArtifacts(sessionDir);
     meta.end = finalizedAt;
 
@@ -295,7 +321,7 @@ export class SessionManager {
       removePartialColdArtifact(sessionDir);
     }
 
-    const audio = readAudioSummary(sessionDir);
+    const audio = await readAudioSummary(sessionDir);
     const warnings = [
       audioDegradationWarning(audio),
       videoDegradationWarning(sessionDir),
@@ -330,7 +356,7 @@ export class SessionManager {
       finalizedAt: result.finalizedAt,
       postProcess: result.postProcess,
     };
-    this.writeSessionArtifact(
+    await this.writeSessionArtifact(
       sessionDir,
       "meta.json",
       JSON.stringify(meta, null, 2),
@@ -340,25 +366,25 @@ export class SessionManager {
 
   // Enumerate the session directories under outputDir, applying the symlink / path
   // traversal guards once so every consumer (list, listSummaries) shares them.
-  private eachSessionDir(
-    visit: (id: string, sessionDir: string) => void,
-  ): void {
-    for (const { id, dir } of defaultSessionStore.listSessions(
+  private async eachSessionDir(
+    visit: (id: string, sessionDir: string) => void | Promise<void>,
+  ): Promise<void> {
+    for (const { id, dir } of await defaultSessionStore.listSessions(
       this.outputDir,
     )) {
-      visit(id, dir);
+      await visit(id, dir);
     }
   }
 
-  list(filters?: {
+  async list(filters?: {
     app?: string;
     after?: number;
     before?: number;
     release?: string;
     build?: string;
-  }): SessionListItem[] {
+  }): Promise<SessionListItem[]> {
     const sessions: SessionListItem[] = [];
-    this.eachSessionDir((_id, sessionDir) => {
+    await this.eachSessionDir((_id, sessionDir) => {
       const metaPath = path.join(sessionDir, "meta.json");
       if (!fs.existsSync(metaPath)) return;
       try {
@@ -414,11 +440,11 @@ export class SessionManager {
   // Rich per-session summaries for the dashboard. Each directory is read independently
   // inside a try/catch so a single bad/partial/malformed session never breaks the list.
   // Returned newest-first (by start, descending).
-  listSummaries(): SessionSummary[] {
+  async listSummaries(): Promise<SessionSummary[]> {
     const summaries: SessionSummary[] = [];
-    this.eachSessionDir((id, sessionDir) => {
+    await this.eachSessionDir(async (id, sessionDir) => {
       try {
-        const summary = readSessionSummary(id, sessionDir);
+        const summary = await readSessionSummary(id, sessionDir);
         if (summary) summaries.push(summary);
       } catch {
         // Skip any directory that fails to read; never throw the whole list.
@@ -437,7 +463,7 @@ export class SessionManager {
     );
   }
 
-  private ensurePartitionParent(segments: string[]): void {
+  private async ensurePartitionParent(segments: string[]): Promise<void> {
     let current = path.resolve(this.outputDir);
     const outputRoot = fs.realpathSync(path.resolve(this.outputDir));
     for (const segment of segments) {
@@ -445,7 +471,7 @@ export class SessionManager {
       if (fs.existsSync(current)) {
         this.assertSafeDirectoryInsideOutput(current, outputRoot);
       } else {
-        ensurePrivateDirectory(current);
+        await ensurePrivateDirectory(current);
         this.assertSafeDirectoryInsideOutput(current, outputRoot);
       }
     }
@@ -470,12 +496,12 @@ export class SessionManager {
     }
   }
 
-  private writeSessionArtifact(
+  private async writeSessionArtifact(
     sessionDir: string,
     name: string,
     data: string | Buffer,
-  ): void {
-    defaultSessionStore.writeSessionArtifact(sessionDir, name, data);
+  ): Promise<void> {
+    await defaultSessionStore.writeSessionArtifact(sessionDir, name, data);
   }
 
   private assertNoSymlinkedGeneratedArtifacts(sessionDir: string): void {
@@ -633,10 +659,13 @@ function isoDate(value: number): string {
 // Reads the artifacts for one session directory and maps them into a SessionSummary.
 // A directory without meta.json, or with corrupt meta.json, is treated as not a session
 // (returns undefined). A valid meta with missing/corrupt index.json degrades gracefully.
-function readSessionSummary(
+// Reads index.json / candidates.jsonl through the SessionStore seam so a storage
+// decorator (the hosted cloud's at-rest encryption) can open them; reading them
+// with fs would silently JSON.parse ciphertext and drop every derived field.
+async function readSessionSummary(
   id: string,
   sessionDir: string,
-): SessionSummary | undefined {
+): Promise<SessionSummary | undefined> {
   const metaPath = path.join(sessionDir, "meta.json");
   if (!fs.existsSync(metaPath)) return undefined;
 
@@ -650,13 +679,11 @@ function readSessionSummary(
   if (typeof metaRecord.id !== "string") metaRecord.id = id;
 
   let index: unknown;
-  const indexPath = path.join(sessionDir, "index.json");
-  if (fs.existsSync(indexPath)) {
-    try {
-      index = JSON.parse(fs.readFileSync(indexPath, "utf-8"));
-    } catch {
-      index = undefined;
-    }
+  try {
+    const raw = await defaultSessionStore.readArtifact(sessionDir, "index.json");
+    index = raw ? JSON.parse(raw.toString("utf-8")) : undefined;
+  } catch {
+    index = undefined;
   }
 
   const flags: SessionFileFlags = {
@@ -664,7 +691,7 @@ function readSessionSummary(
     hasDiagnosis:
       fs.existsSync(path.join(sessionDir, "opinion.json")) ||
       fs.existsSync(path.join(sessionDir, "diagnosis.json")),
-    topSeverity: readTopSeverity(sessionDir),
+    topSeverity: await readTopSeverity(sessionDir),
   };
   return buildSessionSummary(metaRecord, index, flags);
 }
@@ -680,12 +707,17 @@ function existsNonEmptyFile(filePath: string): boolean {
 
 // Best-effort highest candidate severity from candidates.jsonl. Tolerant of a missing or
 // partially malformed file: unreadable lines are skipped.
-function readTopSeverity(sessionDir: string): Severity | undefined {
-  const candidatesPath = path.join(sessionDir, "candidates.jsonl");
+async function readTopSeverity(
+  sessionDir: string,
+): Promise<Severity | undefined> {
   let raw: string;
   try {
-    if (!fs.existsSync(candidatesPath)) return undefined;
-    raw = fs.readFileSync(candidatesPath, "utf-8");
+    const buf = await defaultSessionStore.readArtifact(
+      sessionDir,
+      "candidates.jsonl",
+    );
+    if (!buf) return undefined;
+    raw = buf.toString("utf-8");
   } catch {
     return undefined;
   }
@@ -754,14 +786,13 @@ function sanitizePostProcessError(_err: unknown): string {
   return "Post-processing failed; session artifacts were preserved without derived outputs";
 }
 
-function readAudioSummary(
+async function readAudioSummary(
   sessionDir: string,
-): PostProcessAudioSummary | undefined {
-  const indexPath = path.join(sessionDir, "index.json");
-  if (!fs.existsSync(indexPath)) return undefined;
-
+): Promise<PostProcessAudioSummary | undefined> {
   try {
-    const index: unknown = JSON.parse(fs.readFileSync(indexPath, "utf-8"));
+    const raw = await defaultSessionStore.readArtifact(sessionDir, "index.json");
+    if (!raw) return undefined;
+    const index: unknown = JSON.parse(raw.toString("utf-8"));
     if (
       !isRecord(index) ||
       !isRecord(index.audio) ||

@@ -77,12 +77,12 @@ function readNdjsonFromText(text: string): Array<Record<string, any>> {
     .map((line) => JSON.parse(line));
 }
 
-describe("postProcess", () => {
+describe("postProcess", async () => {
   let tmpDir: string;
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "crumbtrail-pp-"));
   });
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -1526,6 +1526,141 @@ describe("postProcess", () => {
     expect(index.errs[1].url).toBeUndefined();
   });
 
+  it("uses the network id stamped on a rejection to restore its request identity", async () => {
+    // Production shape: a browser fetch failure surfaces as a page-probe net.err
+    // (page-world-untrusted) plus the coincident rejection. The untrusted net.err
+    // is corroboration, not a counted failed request, so it lands in
+    // networkErrors and never in failedReqs. The page probe stamps the shared
+    // network id/method/url onto the rejection, so the rejection restores its
+    // request identity directly rather than through a failedReqs join.
+    const events = [
+      {
+        t: 1000,
+        k: "net.req",
+        d: { source: "page-probe", id: 5, method: "POST", url: "/api/pay" },
+      },
+      {
+        t: 1100,
+        k: "net.err",
+        d: {
+          source: "page-probe",
+          evidenceTrust: "page-world-untrusted",
+          id: 5,
+          method: "POST",
+          url: "/api/pay",
+          dur: 100,
+          msg: "Failed to fetch",
+          name: "TypeError",
+          transport: "fetch",
+        },
+      },
+      {
+        t: 1105,
+        k: "rej",
+        d: {
+          source: "page-probe",
+          msg: "TypeError: Failed to fetch",
+          stk: "at pay",
+          requestId: 5,
+          method: "POST",
+          url: "/api/pay",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+
+    expect(index.errs[0]).toEqual(
+      expect.objectContaining({
+        t: 1105,
+        msg: "TypeError: Failed to fetch",
+        requestId: "5",
+        method: "POST",
+        url: "/api/pay",
+      }),
+    );
+    // The page-world-untrusted net.err is not counted as a failed request, so
+    // nothing carries the id into failedReqs — the join target is networkErrors.
+    expect(
+      index.failedReqs.some((r: { id?: number | string }) => r.id === 5),
+    ).toBe(false);
+    expect(index.networkErrors).toEqual([
+      expect.objectContaining({
+        id: 5,
+        method: "POST",
+        url: "/api/pay",
+        msg: "Failed to fetch",
+      }),
+    ]);
+  });
+
+  it("stamps the request identity onto a rejection even without a timestamp-adjacent net.err", async () => {
+    const events = [
+      {
+        t: 1000,
+        k: "net.req",
+        d: { source: "page-probe", id: 9, method: "GET", url: "/api/feed" },
+      },
+      {
+        t: 1100,
+        k: "net.err",
+        d: {
+          source: "page-probe",
+          evidenceTrust: "page-world-untrusted",
+          id: 9,
+          method: "GET",
+          url: "/api/feed",
+          dur: 100,
+          msg: "Failed to fetch",
+          name: "TypeError",
+          transport: "fetch",
+        },
+      },
+      // Rejection surfaces far later than the failure, so the old timestamp
+      // fallback could not have joined it; the stamped id/method/url still do.
+      {
+        t: 9000,
+        k: "rej",
+        d: {
+          source: "page-probe",
+          msg: "TypeError: Failed to fetch",
+          requestId: 9,
+          method: "GET",
+          url: "/api/feed",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+    await postProcess(tmpDir);
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+
+    expect(index.errs[0]).toEqual(
+      expect.objectContaining({
+        t: 9000,
+        requestId: "9",
+        method: "GET",
+        url: "/api/feed",
+      }),
+    );
+    expect(
+      index.failedReqs.some((r: { id?: number | string }) => r.id === 9),
+    ).toBe(false);
+    expect(index.networkErrors).toEqual([
+      expect.objectContaining({ id: 9, method: "GET", url: "/api/feed" }),
+    ]);
+  });
+
   it("indexes 200 responses with application failure payloads as failed requests", async () => {
     const events = [
       { t: 1000, k: "clk", d: { el: { tag: "BUTTON", txt: "Sync now" } } },
@@ -2384,7 +2519,7 @@ describe("postProcess", () => {
     expect(serializedBoundaryIndex).not.toContain("/private");
   });
 
-  describe("audio / whisper processing", () => {
+  describe("audio / whisper processing", async () => {
     it("skips whisper processing when no audio.webm exists (no error)", async () => {
       const events = [
         { t: 1000, k: "nav", d: { to: "/", from: "", tr: "init" } },
@@ -2605,7 +2740,7 @@ describe("postProcess", () => {
     });
   });
 
-  describe("storage snapshot summary", () => {
+  describe("storage snapshot summary", async () => {
     it("includes storageSummary in index when snap event is present", async () => {
       const events = [
         {
@@ -2731,35 +2866,35 @@ describe("postProcess", () => {
   });
 });
 
-describe("storage-plane generated artifacts", () => {
+describe("storage-plane generated artifacts", async () => {
   let tmpDir: string;
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "crumbtrail-storage-plane-"),
     );
   });
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("refuses to overwrite symlinked cold-storage artifacts", () => {
+  it("refuses to overwrite symlinked cold-storage artifacts", async () => {
     const outside = path.join(tmpDir, "outside.json");
     fs.writeFileSync(outside, "outside");
     fs.symlinkSync(outside, path.join(tmpDir, "signatures.json"));
 
-    expect(() =>
+    await expect(
       writeColdEvidenceArtifacts({
         sessionDir: tmpDir,
         events: [
           { t: 1000, k: "nav", d: { to: "https://example.test" } },
         ] as any,
       }),
-    ).toThrow(/symlinked generated artifact/);
+    ).rejects.toThrow(/symlinked generated artifact/);
     expect(fs.readFileSync(outside, "utf-8")).toBe("outside");
   });
 
-  it("redacts compact and dotted sensitive event fields before cold storage writes", () => {
-    writeColdEvidenceArtifacts({
+  it("redacts compact and dotted sensitive event fields before cold storage writes", async () => {
+    await writeColdEvidenceArtifacts({
       sessionDir: tmpDir,
       events: [
         {

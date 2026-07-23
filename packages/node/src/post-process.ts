@@ -227,6 +227,11 @@ interface SessionIndex {
   errs: Array<{
     t: number;
     msg: string;
+    // The per-session browser network id shared with the coincident net.err /
+    // failedReqs entry. Present when the page probe could key the thrown error
+    // to its failed request; lets consumers join the rejection to its request
+    // without relying on timestamp proximity.
+    requestId?: string | number;
     method?: string;
     url?: string;
     // Source location of the throw. `file`/`line`/`col` come straight from the
@@ -283,24 +288,28 @@ export async function postProcess(
   const mergedEvents = audioResult.events;
 
   if (mergedEvents.length === 0) {
-    const index = writeEmptyIndex(sessionDir, audioResult.audio, truncation);
-    const candidates = writeEvidenceIndex({
+    const index = await writeEmptyIndex(
+      sessionDir,
+      audioResult.audio,
+      truncation,
+    );
+    const candidates = await writeEvidenceIndex({
       sessionDir,
       events: mergedEvents,
       index,
       causalGraph: undefined,
     });
-    const coldEvidence = writeColdEvidenceArtifacts({
+    const coldEvidence = await writeColdEvidenceArtifacts({
       sessionDir,
       events: mergedEvents,
     });
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir,
       events: mergedEvents,
       index,
       candidates,
     });
-    writeTwoPlaneSessionArtifacts({
+    await writeTwoPlaneSessionArtifacts({
       sessionDir,
       events: mergedEvents,
       index,
@@ -339,13 +348,22 @@ export async function postProcess(
       const msg = safeDiagnosticString(event.d.msg) ?? "";
       const entry: SessionIndex["errs"][number] = { t: event.t, msg };
       // A fetch network failure surfaces twice: as a net.err and, when uncaught,
-      // as a rejection moments later. Attach the request identity to the error
-      // entry so the failing URL is visible from the error itself.
-      const linked = isNetworkFailureMessage(msg)
-        ? findRecentNetworkFailure(recentNetErrs, event.t)
-        : undefined;
-      if (linked?.m) entry.method = linked.m;
-      if (linked?.url) entry.url = linked.url;
+      // as a rejection moments later. The page probe stamps the shared network
+      // id (plus method/url) onto the rejection when it can key the thrown
+      // error, so prefer that direct identity; fall back to timestamp proximity
+      // for older sessions that lack the id.
+      const requestId = safeId(event.d.requestId) ?? safeId(event.d.id);
+      const directMethod = safeMethod(event.d.method) ?? safeMethod(event.d.m);
+      const directUrl = safeUrl(event.d.url);
+      const linked =
+        directUrl === undefined && isNetworkFailureMessage(msg)
+          ? findRecentNetworkFailure(recentNetErrs, event.t)
+          : undefined;
+      if (requestId !== undefined) entry.requestId = requestId;
+      const method = directMethod ?? linked?.m;
+      if (method) entry.method = method;
+      const url = directUrl ?? linked?.url;
+      if (url) entry.url = url;
       const file = safeUrl(event.d.file) ?? safePath(event.d.file);
       if (file) entry.file = file;
       const line = safeInteger(event.d.line);
@@ -468,24 +486,28 @@ export async function postProcess(
     ...(truncation !== undefined ? { truncated: truncation } : {}),
   };
 
-  fs.writeFileSync(path.join(sessionDir, "index.json"), JSON.stringify(index));
-  const candidates = writeEvidenceIndex({
+  await defaultSessionStore.writeArtifact(
+    sessionDir,
+    "index.json",
+    JSON.stringify(index),
+  );
+  const candidates = await writeEvidenceIndex({
     sessionDir,
     events: mergedEvents,
     index,
     causalGraph,
   });
-  const coldEvidence = writeColdEvidenceArtifacts({
+  const coldEvidence = await writeColdEvidenceArtifacts({
     sessionDir,
     events: mergedEvents,
   });
-  const bundle = writeLlmBundle({
+  const bundle = await writeLlmBundle({
     sessionDir,
     events: mergedEvents,
     index,
     candidates,
   });
-  writeTwoPlaneSessionArtifacts({
+  await writeTwoPlaneSessionArtifacts({
     sessionDir,
     events: mergedEvents,
     index,
@@ -1473,7 +1495,11 @@ async function processAudio(
       );
     }
 
-    const txEvents = readTranscriptEvents(transcriptPath, events, sessionDir);
+    const txEvents = await readTranscriptEvents(
+      transcriptPath,
+      events,
+      sessionDir,
+    );
 
     // Merge and re-sort. Drop existing tx events so repeated successful post-process runs don't duplicate.
     const baseEvents = events.filter((e) => e.k !== "tx");
@@ -1504,11 +1530,11 @@ async function processAudio(
   }
 }
 
-function readTranscriptEvents(
+async function readTranscriptEvents(
   transcriptPath: string,
   events: BugEvent[],
   sessionDir: string,
-): BugEvent[] {
+): Promise<BugEvent[]> {
   let transcript: unknown;
   try {
     transcript = JSON.parse(fs.readFileSync(transcriptPath, "utf-8"));
@@ -1516,7 +1542,7 @@ function readTranscriptEvents(
     throw new AudioProcessingError("transcript", err);
   }
 
-  const startTime = events[0]?.t ?? readMetaStart(sessionDir) ?? 0;
+  const startTime = events[0]?.t ?? (await readMetaStart(sessionDir)) ?? 0;
   const txEvents: BugEvent[] = [];
   const segments =
     isRecord(transcript) && Array.isArray(transcript.transcription)
@@ -1714,9 +1740,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
-function readMetaStart(sessionDir: string): number | undefined {
+async function readMetaStart(
+  sessionDir: string,
+): Promise<number | undefined> {
   try {
-    const buf = defaultSessionStore.readArtifact(sessionDir, "meta.json");
+    const buf = await defaultSessionStore.readArtifact(sessionDir, "meta.json");
     if (!buf) return undefined;
     const meta = JSON.parse(buf.toString("utf-8"));
     return finiteNumber(meta.start);
@@ -1725,11 +1753,11 @@ function readMetaStart(sessionDir: string): number | undefined {
   }
 }
 
-function writeEmptyIndex(
+async function writeEmptyIndex(
   sessionDir: string,
   audio?: PostProcessAudioSummary,
   truncation?: CaptureTruncationSummary,
-): SessionIndex {
+): Promise<SessionIndex> {
   const index: SessionIndex = {
     id: path.basename(sessionDir),
     start: 0,
@@ -1744,6 +1772,10 @@ function writeEmptyIndex(
     ...(audio !== undefined ? { audio } : {}),
     ...(truncation !== undefined ? { truncated: truncation } : {}),
   };
-  fs.writeFileSync(path.join(sessionDir, "index.json"), JSON.stringify(index));
+  await defaultSessionStore.writeArtifact(
+    sessionDir,
+    "index.json",
+    JSON.stringify(index),
+  );
   return index;
 }

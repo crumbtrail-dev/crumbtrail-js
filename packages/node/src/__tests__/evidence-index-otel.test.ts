@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 describe("buildEvidenceCandidates — OTel sources", () => {
-  it("ranks an OTLP error span (status=ERROR) as a high-severity candidate", () => {
+  it("ranks an OTLP error span (status=ERROR) as a high-severity candidate", async () => {
     const events: BugEvent[] = [
       {
         t: 1000,
@@ -36,7 +36,7 @@ describe("buildEvidenceCandidates — OTel sources", () => {
     expect(candidates[0].anchor.t).toBe(1000);
   });
 
-  it("ranks an OTLP server span with http status >= 500 even when status code is UNSET", () => {
+  it("ranks an OTLP server span with http status >= 500 even when status code is UNSET", async () => {
     const events: BugEvent[] = [
       {
         t: 2000,
@@ -55,7 +55,7 @@ describe("buildEvidenceCandidates — OTel sources", () => {
     expect(candidates[0].anchor.status).toBe(503);
   });
 
-  it("ranks an OTLP ERROR/FATAL log and ignores INFO logs", () => {
+  it("ranks an OTLP ERROR/FATAL log and ignores INFO logs", async () => {
     const events: BugEvent[] = [
       {
         t: 3000,
@@ -85,7 +85,7 @@ describe("buildEvidenceCandidates — OTel sources", () => {
     expect(candidates[0].anchor.message).toContain("db connection refused");
   });
 
-  it("does not invent candidates for OK spans (no false positives)", () => {
+  it("does not invent candidates for OK spans (no false positives)", async () => {
     const events: BugEvent[] = [
       {
         t: 4000,
@@ -100,7 +100,7 @@ describe("buildEvidenceCandidates — OTel sources", () => {
     expect(buildEvidenceCandidates(events, {})).toHaveLength(0);
   });
 
-  it("surfaces OTel db span statements as activity evidence near an error", () => {
+  it("surfaces OTel db span statements as activity evidence near an error", async () => {
     const events: BugEvent[] = [
       {
         t: 1000,
@@ -140,10 +140,10 @@ describe("buildEvidenceCandidates — OTel sources", () => {
     expect(db?.anchor.source).toContain("statements, not row diffs");
   });
 
-  it("writes a non-empty candidate index for an OTLP-only session", () => {
+  it("writes a non-empty candidate index for an OTLP-only session", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bl-otel-idx-"));
     tmpDirs.push(dir);
-    writeEvidenceIndex({
+    await writeEvidenceIndex({
       sessionDir: dir,
       events: [
         {

@@ -162,22 +162,22 @@ export class FixContextError extends Error {
  * Builds the fix-context contract for a finalized session by reading hot-plane artifacts
  * (index.json, candidates.jsonl, llm.json). It never reads raw NDJSON at query time.
  */
-export function buildFixContext(
+export async function buildFixContext(
   sessionDirOrId: string,
   opts: BuildFixContextOptions = {},
-): FixContext {
+): Promise<FixContext> {
   const sessionDir = resolveSessionDir(sessionDirOrId, opts);
-  if (!defaultSessionStore.statArtifact(sessionDir, "index.json")) {
+  if (!(await defaultSessionStore.statArtifact(sessionDir, "index.json"))) {
     throw new FixContextError(
       "session-not-found",
       `No finalized session found at ${sessionDir} (missing index.json). Run post-processing first.`,
     );
   }
 
-  const index = readJsonRecord(sessionDir, "index.json") ?? {};
-  const bundle = readBundle(sessionDir);
-  const ranked = readCandidates(sessionDir);
-  const opinion = readJsonRecord(sessionDir, "opinion.json");
+  const index = (await readJsonRecord(sessionDir, "index.json")) ?? {};
+  const bundle = await readBundle(sessionDir);
+  const ranked = await readCandidates(sessionDir);
+  const opinion = await readJsonRecord(sessionDir, "opinion.json");
 
   return buildFixContextFromArtifacts(sessionDir, index, bundle, ranked, {
     opinion,
@@ -460,8 +460,13 @@ function buildReproHint(
   }) as FixContextReproHint;
 }
 
-function readCandidates(sessionDir: string): EvidenceCandidate[] {
-  const buf = defaultSessionStore.readArtifact(sessionDir, "candidates.jsonl");
+async function readCandidates(
+  sessionDir: string,
+): Promise<EvidenceCandidate[]> {
+  const buf = await defaultSessionStore.readArtifact(
+    sessionDir,
+    "candidates.jsonl",
+  );
   if (!buf) return [];
   const content = buf.toString("utf-8").trim();
   if (!content) return [];
@@ -478,19 +483,19 @@ function readCandidates(sessionDir: string): EvidenceCandidate[] {
   return candidates;
 }
 
-function readBundle(sessionDir: string): LlmBundle | undefined {
+async function readBundle(sessionDir: string): Promise<LlmBundle | undefined> {
   const record =
-    readJsonRecord(sessionDir, "llm.json") ??
-    readJsonRecord(sessionDir, "bundle.json");
+    (await readJsonRecord(sessionDir, "llm.json")) ??
+    (await readJsonRecord(sessionDir, "bundle.json"));
   return record as LlmBundle | undefined;
 }
 
-function readJsonRecord(
+async function readJsonRecord(
   sessionDir: string,
   name: string,
-): Record<string, unknown> | undefined {
+): Promise<Record<string, unknown> | undefined> {
   try {
-    const buf = defaultSessionStore.readArtifact(sessionDir, name);
+    const buf = await defaultSessionStore.readArtifact(sessionDir, name);
     if (!buf) return undefined;
     const parsed: unknown = JSON.parse(buf.toString("utf-8"));
     return isRecord(parsed) ? parsed : undefined;

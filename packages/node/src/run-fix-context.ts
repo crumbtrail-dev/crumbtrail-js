@@ -63,16 +63,22 @@ export async function runFixContext(
   // One build attempt. A miss (latest resolver empty, or buildFixContext's
   // session-not-found) returns a reason instead of throwing so --follow can
   // poll on it; unexpected errors still propagate.
-  const tryOnce = (): { context?: FixContext; reason: string } => {
+  const tryOnce = async (): Promise<{
+    context?: FixContext;
+    reason: string;
+  }> => {
     if (latest) {
-      const hit = resolveLatestIssue({ outputDir });
+      const hit = await resolveLatestIssue({ outputDir });
       if (!hit) {
         return {
           reason: `No finalized session with error-class evidence found under ${outputDir}; run a session and wait for finalize, or pass a session id.`,
         };
       }
       try {
-        return { context: buildFixContext(hit.dir, { outputDir }), reason: "" };
+        return {
+          context: await buildFixContext(hit.dir, { outputDir }),
+          reason: "",
+        };
       } catch (err) {
         if (err instanceof FixContextError) return { reason: err.message };
         throw err;
@@ -80,7 +86,7 @@ export async function runFixContext(
     }
     try {
       return {
-        context: buildFixContext(resolveTarget(target as string), {
+        context: await buildFixContext(resolveTarget(target as string), {
           outputDir,
         }),
         reason: "",
@@ -91,7 +97,7 @@ export async function runFixContext(
     }
   };
 
-  let outcome = tryOnce();
+  let outcome = await tryOnce();
   if (!outcome.context && follow) {
     process.stderr.write(
       `crumbtrail-server fix-context: waiting for ${describeTarget} (interval ${intervalMs}ms, timeout ${timeoutMs}ms)...\n`,
@@ -99,7 +105,7 @@ export async function runFixContext(
     const deadline = Date.now() + timeoutMs;
     while (!outcome.context && Date.now() < deadline) {
       await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
-      outcome = tryOnce();
+      outcome = await tryOnce();
     }
   }
 

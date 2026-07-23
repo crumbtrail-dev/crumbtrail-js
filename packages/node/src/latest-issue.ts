@@ -23,17 +23,19 @@ export interface LatestIssue {
   dir: string;
 }
 
-export function resolveLatestIssue(opts: {
+export async function resolveLatestIssue(opts: {
   outputDir: string;
-}): LatestIssue | undefined {
+}): Promise<LatestIssue | undefined> {
   let best: { sessionId: string; dir: string; recency: number } | undefined;
 
-  for (const { id, dir } of defaultSessionStore.listSessions(opts.outputDir)) {
-    const index = readJsonRecord(dir, "index.json");
+  for (const { id, dir } of await defaultSessionStore.listSessions(
+    opts.outputDir,
+  )) {
+    const index = await readJsonRecord(dir, "index.json");
     if (!index) continue; // not finalized
-    if (!hasErrorClassEvidence(dir, index)) continue;
+    if (!(await hasErrorClassEvidence(dir, index))) continue;
 
-    const recency = recencyOf(dir, index);
+    const recency = await recencyOf(dir, index);
     if (!best || beats({ sessionId: id, dir, recency }, best)) {
       best = { sessionId: id, dir, recency };
     }
@@ -53,30 +55,33 @@ function beats(
   return candidate.dir > incumbent.dir;
 }
 
-function hasErrorClassEvidence(
+async function hasErrorClassEvidence(
   dir: string,
   index: Record<string, unknown>,
-): boolean {
+): Promise<boolean> {
   if (Array.isArray(index.errs) && index.errs.length > 0) return true;
   if (Array.isArray(index.failedReqs) && index.failedReqs.length > 0)
     return true;
-  return candidateSeverities(dir).some(
+  return (await candidateSeverities(dir)).some(
     (severity) => severity === "critical" || severity === "high",
   );
 }
 
-function recencyOf(dir: string, index: Record<string, unknown>): number {
+async function recencyOf(
+  dir: string,
+  index: Record<string, unknown>,
+): Promise<number> {
   const end = finiteNumber(index.end);
   if (end !== undefined) return end;
   const start = finiteNumber(index.start);
   if (start !== undefined) return start;
-  const meta = readJsonRecord(dir, "meta.json");
+  const meta = await readJsonRecord(dir, "meta.json");
   return finiteNumber(meta?.start) ?? 0;
 }
 
 /** Severities of the detector signal rows in candidates.jsonl, rank order. */
-function candidateSeverities(dir: string): string[] {
-  const buf = defaultSessionStore.readArtifact(dir, "candidates.jsonl");
+async function candidateSeverities(dir: string): Promise<string[]> {
+  const buf = await defaultSessionStore.readArtifact(dir, "candidates.jsonl");
   if (!buf) return [];
   const severities: string[] = [];
   for (const line of buf.toString("utf-8").split("\n")) {
@@ -98,12 +103,12 @@ function candidateSeverities(dir: string): string[] {
   return severities;
 }
 
-function readJsonRecord(
+async function readJsonRecord(
   dir: string,
   name: string,
-): Record<string, unknown> | undefined {
+): Promise<Record<string, unknown> | undefined> {
   try {
-    const buf = defaultSessionStore.readArtifact(dir, name);
+    const buf = await defaultSessionStore.readArtifact(dir, name);
     if (!buf) return undefined;
     const parsed: unknown = JSON.parse(buf.toString("utf-8"));
     return typeof parsed === "object" &&

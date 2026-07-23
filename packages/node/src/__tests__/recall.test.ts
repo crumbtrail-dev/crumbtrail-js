@@ -41,8 +41,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function fakeStore(sessions: FakeSession[]): RecallStore {
   const byDir = new Map(sessions.map((s) => [s.id, s]));
   return {
-    listSessions: () => sessions.map((s) => ({ id: s.id, dir: s.id })),
-    readJsonRecord: (dir, name) => {
+    listSessions: async () => sessions.map((s) => ({ id: s.id, dir: s.id })),
+    readJsonRecord: async (dir, name) => {
       if (name !== "llm.json") return undefined;
       const session = byDir.get(dir);
       return session
@@ -52,7 +52,7 @@ function fakeStore(sessions: FakeSession[]): RecallStore {
           >)
         : undefined;
     },
-    readDistinctBugs: (dir) => byDir.get(dir)?.bugs ?? [],
+    readDistinctBugs: async (dir) => byDir.get(dir)?.bugs ?? [],
     isDistinctBugRecord: (x) =>
       isRecord(x) &&
       typeof x.bugId === "string" &&
@@ -80,8 +80,8 @@ function bug(partial: Partial<FakeBug> & { bugId: string }): FakeBug {
   };
 }
 
-describe("recallLocal (direct, in-memory store)", () => {
-  it("ranks a rhyming session above an unrelated one", () => {
+describe("recallLocal (direct, in-memory store)", async () => {
+  it("ranks a rhyming session above an unrelated one", async () => {
     const store = fakeStore([
       {
         id: "sess-a",
@@ -121,22 +121,22 @@ describe("recallLocal (direct, in-memory store)", () => {
       facetTokens: ["betaCheckout"],
     };
 
-    const matches = recallLocal(query, store, undefined, 5);
+    const matches = await recallLocal(query, store, undefined, 5);
     expect(matches.map((m) => m.sessionId)).toEqual(["sess-a", "sess-c"]);
     expect(matches[0].reasons).toContain("same-route");
   });
 
-  it("excludes the querying session", () => {
+  it("excludes the querying session", async () => {
     const store = fakeStore([
       { id: "sess-a", bundle: {}, bugs: [bug({ bugId: "bug-a" })] },
       { id: "sess-b", bundle: {}, bugs: [bug({ bugId: "bug-b" })] },
     ]);
-    const query = sessionIssueProfile("sess-b", store)!;
-    const matches = recallLocal(query, store, "sess-b", 5);
+    const query = (await sessionIssueProfile("sess-b", store))!;
+    const matches = await recallLocal(query, store, "sess-b", 5);
     expect(matches.map((m) => m.sessionId)).toEqual(["sess-a"]);
   });
 
-  it("dedupes by signature, keeping the highest-scoring occurrence", () => {
+  it("dedupes by signature, keeping the highest-scoring occurrence", async () => {
     // Two sessions carry the same distinct bug (identical signature). Only one
     // entry should survive — the higher-scoring one (same env facet overlap).
     const shared = {
@@ -168,13 +168,13 @@ describe("recallLocal (direct, in-memory store)", () => {
       facetTokens: ["betaCheckout"],
     };
 
-    const matches = recallLocal(query, store, undefined, 5);
+    const matches = await recallLocal(query, store, undefined, 5);
     expect(matches).toHaveLength(1);
     expect(matches[0].sessionId).toBe("sess-strong");
     expect(matches[0].reasons).toContain("env-overlap");
   });
 
-  it("merges digit-bearing route variants as one recurrence", () => {
+  it("merges digit-bearing route variants as one recurrence", async () => {
     const store = fakeStore(
       Array.from({ length: 5 }, (_, i) => ({
         id: `sess-${i}`,
@@ -197,11 +197,11 @@ describe("recallLocal (direct, in-memory store)", () => {
       tokens: tokenizeIssueText("Payment failed gateway timeout"),
       facetTokens: [],
     };
-    const matches = recallLocal(query, store, undefined, 2);
+    const matches = await recallLocal(query, store, undefined, 2);
     expect(matches).toHaveLength(1);
   });
 
-  it("honours the limit across distinct recurrences", () => {
+  it("honours the limit across distinct recurrences", async () => {
     const store = fakeStore(
       ["cart", "catalog", "dashboard", "profile", "settings"].map(
         (route, i) => ({
@@ -224,11 +224,11 @@ describe("recallLocal (direct, in-memory store)", () => {
       tokens: tokenizeIssueText("Payment failed gateway timeout"),
       facetTokens: [],
     };
-    const matches = recallLocal(query, store, undefined, 2);
+    const matches = await recallLocal(query, store, undefined, 2);
     expect(matches).toHaveLength(2);
   });
 
-  it("drops zero-score candidates", () => {
+  it("drops zero-score candidates", async () => {
     const store = fakeStore([
       {
         id: "sess-unrelated",
@@ -250,18 +250,18 @@ describe("recallLocal (direct, in-memory store)", () => {
       tokens: tokenizeIssueText("payment gateway checkout"),
       facetTokens: [],
     };
-    const matches = recallLocal(query, store, undefined, 5);
+    const matches = await recallLocal(query, store, undefined, 5);
     expect(matches).toHaveLength(0);
   });
 });
 
 describe("sessionIssueProfile (direct)", () => {
-  it("returns undefined when the session has no indexed bugs", () => {
+  it("returns undefined when the session has no indexed bugs", async () => {
     const store = fakeStore([{ id: "empty", bundle: {}, bugs: [] }]);
-    expect(sessionIssueProfile("empty", store)).toBeUndefined();
+    expect(await sessionIssueProfile("empty", store)).toBeUndefined();
   });
 
-  it("seeds the profile from the strongest (highest-severity) bug", () => {
+  it("seeds the profile from the strongest (highest-severity) bug", async () => {
     const store = fakeStore([
       {
         id: "sess",
@@ -288,7 +288,7 @@ describe("sessionIssueProfile (direct)", () => {
         ],
       },
     ]);
-    const profile = sessionIssueProfile("sess", store);
+    const profile = await sessionIssueProfile("sess", store);
     expect(profile?.route).toBe("/critical");
     expect(profile?.errorFamily).toBe("otel_span_error");
   });

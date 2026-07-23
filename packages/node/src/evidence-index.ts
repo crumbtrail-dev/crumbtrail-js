@@ -10,6 +10,7 @@ import {
 import { BROWSER_REDACTION_POLICY, normalizeDbEngine } from "./llm-bundle";
 import { redactedNetworkBodySnippet } from "./network-body";
 import { attributeCandidates } from "./causal-graph";
+import { defaultSessionStore } from "./session-store";
 import type { CausalConfidence, CausalGraph } from "./causal-graph";
 
 export const CANDIDATE_SCHEMA_VERSION = 1 as const;
@@ -138,6 +139,9 @@ export interface EvidenceIndexInput {
     errs?: Array<{
       t: number;
       msg?: string;
+      requestId?: string | number;
+      method?: string;
+      url?: string;
       file?: string;
       line?: number;
       col?: number;
@@ -238,9 +242,13 @@ interface RequestInfo {
   route?: string;
 }
 
-export function writeEvidenceIndex(
+// Every artifact here goes through the SessionStore seam rather than fs directly:
+// these are finalize-time cold-plane files, and an embedder that decorates the
+// store (the hosted cloud's at-rest envelope encryption) must see them, or they
+// stay plaintext on the volume while the rest of the session is sealed.
+export async function writeEvidenceIndex(
   input: EvidenceIndexInput,
-): EvidenceCandidate[] {
+): Promise<EvidenceCandidate[]> {
   const events = normalizeEvidenceEvents(input.events);
   const index = withNavigationContext(events, input.index);
   const candidates = buildEvidenceCandidates(events, index, input.causalGraph);
@@ -249,26 +257,31 @@ export function writeEvidenceIndex(
   fs.rmSync(windowsDir, { recursive: true, force: true });
   fs.mkdirSync(windowsDir, { recursive: true });
 
-  fs.writeFileSync(
-    path.join(input.sessionDir, "CANDIDATES.md"),
+  await defaultSessionStore.writeArtifact(
+    input.sessionDir,
+    "CANDIDATES.md",
     renderCandidatesMarkdown(candidates, normalizedInput),
   );
-  fs.writeFileSync(
-    path.join(input.sessionDir, "candidates.jsonl"),
+  await defaultSessionStore.writeArtifact(
+    input.sessionDir,
+    "candidates.jsonl",
     renderCandidatesJsonl(candidates),
   );
-  fs.writeFileSync(
-    path.join(input.sessionDir, "timeline.md"),
+  await defaultSessionStore.writeArtifact(
+    input.sessionDir,
+    "timeline.md",
     renderTimelineMarkdown(events, index),
   );
-  fs.writeFileSync(
-    path.join(input.sessionDir, "search.jsonl"),
+  await defaultSessionStore.writeArtifact(
+    input.sessionDir,
+    "search.jsonl",
     renderSearchJsonl(events, candidates, index),
   );
 
   for (const candidate of candidates) {
-    fs.writeFileSync(
-      path.join(windowsDir, `${candidate.id}.md`),
+    await defaultSessionStore.writeArtifact(
+      input.sessionDir,
+      `windows/${candidate.id}.md`,
       renderWindowMarkdown(candidate, events, index),
     );
   }
@@ -395,6 +408,12 @@ export function buildEvidenceCandidates(
         candidate.t === entry.t &&
         (candidate.k === "err" || candidate.k === "rej"),
     );
+    // A "Failed to fetch" rejection carries no location of its own. When the
+    // page probe could key the thrown error to its failed request, the errs
+    // entry inherits that request's id/method/url, so surface it on the anchor
+    // (mirrors the http_error anchor above) to restore request identity.
+    const requestId =
+      entry.requestId != null ? String(entry.requestId) : undefined;
     drafts.push({
       detector: event?.k === "rej" ? "unhandled_rejection" : "uncaught_error",
       title: `${event?.k === "rej" ? "Unhandled rejection" : "Uncaught error"}: ${scrubText(entry.msg, 100) ?? "message unavailable"}`,
@@ -406,6 +425,9 @@ export function buildEvidenceCandidates(
         offsetMs:
           offsetForEvent(event) ?? offsetFromStart(entry.t, index.start),
         route: routeAt(index.navs ?? [], entry.t),
+        requestId,
+        method: entry.method,
+        url: redactUrl(entry.url),
         message: scrubText(entry.msg, 220),
         frame: codeFrameOf(entry),
       }),

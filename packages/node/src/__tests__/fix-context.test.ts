@@ -108,7 +108,7 @@ async function seedSession(outputDir: string): Promise<string> {
   return sessionDir;
 }
 
-describe("buildFixContext", () => {
+describe("buildFixContext", async () => {
   let tmpDir: string;
   let sessionDir: string;
 
@@ -117,12 +117,12 @@ describe("buildFixContext", () => {
     sessionDir = await seedSession(tmpDir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("locks the fix-context.v2 schema shape with honest signal bases", () => {
-    const fc = buildFixContext(sessionDir);
+  it("locks the fix-context.v2 schema shape with honest signal bases", async () => {
+    const fc = await buildFixContext(sessionDir);
 
     expect(fc.schemaVersion).toBe("fix-context.v2");
     expect(FIX_CONTEXT_SCHEMA_VERSION).toBe("fix-context.v2");
@@ -152,12 +152,12 @@ describe("buildFixContext", () => {
     });
   });
 
-  it("omits code_pointers when no opinion artifact exists", () => {
-    const fc = buildFixContext(sessionDir);
+  it("omits code_pointers when no opinion artifact exists", async () => {
+    const fc = await buildFixContext(sessionDir);
     expect("code_pointers" in fc).toBe(false);
   });
 
-  it("surfaces cloud-resolved code pointers from the opinion artifact", () => {
+  it("surfaces cloud-resolved code pointers from the opinion artifact", async () => {
     const pointer = {
       repo: "acme/shop",
       path: "src/checkout.ts",
@@ -181,12 +181,12 @@ describe("buildFixContext", () => {
         ],
       }),
     );
-    const fc = buildFixContext(sessionDir);
+    const fc = await buildFixContext(sessionDir);
     expect(fc.code_pointers).toEqual([pointer]);
   });
 
-  it("defaults db_diffs/db_reads to [] and environment to null", () => {
-    const fc = buildFixContext(sessionDir);
+  it("defaults db_diffs/db_reads to [] and environment to null", async () => {
+    const fc = await buildFixContext(sessionDir);
     expect(fc.primary_window.db_diffs).toEqual([]);
     expect(fc.primary_window.db_reads).toEqual([]);
     expect(fc.environment).toBeNull();
@@ -240,7 +240,7 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(dir);
+      const fc = await buildFixContext(dir);
       expect(fc.environment).not.toBeNull();
       const env = fc.environment as Record<string, any>;
       expect(env.browser.name).toBe("Chrome");
@@ -290,7 +290,7 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(dir);
+      const fc = await buildFixContext(dir);
       expect(fc.primary_window.db_diffs.length).toBeGreaterThan(0);
       const diff = fc.primary_window.db_diffs[0];
       expect(diff.op).toBe("update");
@@ -402,7 +402,7 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(dir);
+      const fc = await buildFixContext(dir);
       // The standalone db_mutation is the only signal, and its window covers the diff.
       expect(fc.signals[0].detector).toBe("db_mutation");
       expect(fc.primary_window.db_diffs.length).toBeGreaterThan(0);
@@ -482,7 +482,7 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(dir);
+      const fc = await buildFixContext(dir);
       expect(
         fc.signals.some(
           (candidate) => candidate.detector === "otel_db_activity",
@@ -604,7 +604,7 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(dir);
+      const fc = await buildFixContext(dir);
       expect(fc.signals[0].detector).toBe("db_mutation");
       expect(fc.primary_window.db_diffs).toHaveLength(1);
       expect(fc.primary_window.db_reads).toHaveLength(2);
@@ -623,8 +623,8 @@ describe("buildFixContext", () => {
     }
   });
 
-  it("ranks the backend root above its net.res symptom (causal re-rank)", () => {
-    const fc = buildFixContext(sessionDir);
+  it("ranks the backend root above its net.res symptom (causal re-rank)", async () => {
+    const fc = await buildFixContext(sessionDir);
     expect(fc.signals.length).toBeGreaterThan(0);
     // The backend error is the root cause of the correlated 500 response; the causal re-rank makes
     // it ranked[0] and demotes the frontend-observed http_error to a symptom below it. (Before CP3
@@ -642,8 +642,8 @@ describe("buildFixContext", () => {
     expect(top.score).toBe(89);
   });
 
-  it("surfaces a causal_chain projecting root → symptom from signal fields", () => {
-    const fc = buildFixContext(sessionDir);
+  it("surfaces a causal_chain projecting root → symptom from signal fields", async () => {
+    const fc = await buildFixContext(sessionDir);
 
     // signals[0] is the backend root; the chain projects that same order without re-sort.
     expect(fc.signals[0].causalRole).toBe("root");
@@ -700,7 +700,7 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(dir);
+      const fc = await buildFixContext(dir);
       expect(fc.signals.length).toBeGreaterThan(0);
       // The single console error attributes no downstream symptoms (no `causes`), so even if it is
       // labeled a root it yields NO chain — causal_chain must be null.
@@ -711,8 +711,8 @@ describe("buildFixContext", () => {
     }
   });
 
-  it("keeps signals root-first and context defaults intact", () => {
-    const fc = buildFixContext(sessionDir);
+  it("keeps signals root-first and context defaults intact", async () => {
+    const fc = await buildFixContext(sessionDir);
     // Root-first order: the backend root precedes its http_error symptom in file order.
     const rootIdx = fc.signals.findIndex(
       (c) => c.detector === "backend_http_error",
@@ -727,8 +727,8 @@ describe("buildFixContext", () => {
     expect(fc.repro_hint).not.toBeNull();
   });
 
-  it("derives the primary window from the top candidate plus linked full-stack evidence", () => {
-    const fc = buildFixContext(sessionDir);
+  it("derives the primary window from the top candidate plus linked full-stack evidence", async () => {
+    const fc = await buildFixContext(sessionDir);
     const window = fc.primary_window.frontend.window;
     expect(window).not.toBeNull();
     expect(window!.start).toBeLessThanOrEqual(1520);
@@ -738,14 +738,14 @@ describe("buildFixContext", () => {
     expect(fc.primary_window.backend.requests[0].statusCode).toBe(500);
   });
 
-  it("derives a repro_hint from the top candidate", () => {
-    const fc = buildFixContext(sessionDir);
+  it("derives a repro_hint from the top candidate", async () => {
+    const fc = await buildFixContext(sessionDir);
     expect(fc.repro_hint).not.toBeNull();
     expect(fc.repro_hint!.detector).toBe("backend_http_error");
     expect(fc.repro_hint!.title).toContain("500");
   });
 
-  it("carries target descriptors from signals into fix-context hints", () => {
+  it("carries target descriptors from signals into fix-context hints", async () => {
     const dir = path.join(tmpDir, "ses_fc_target");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -785,7 +785,7 @@ describe("buildFixContext", () => {
       })}\n`,
     );
 
-    const fc = buildFixContext(dir);
+    const fc = await buildFixContext(dir);
 
     expect(fc.primary_window.frontend.anchor?.target).toMatchObject({
       role: "button",
@@ -865,7 +865,7 @@ describe("buildFixContext", () => {
     );
     await postProcess(dir);
 
-    const fc = buildFixContext(dir);
+    const fc = await buildFixContext(dir);
 
     expect(fc.signals[0].anchor.target).toMatchObject({
       testID: "submit-order",
@@ -881,8 +881,8 @@ describe("buildFixContext", () => {
     });
   });
 
-  it("resolves a bare session id against outputDir", () => {
-    const fc = buildFixContext(SESSION_ID, { outputDir: tmpDir });
+  it("resolves a bare session id against outputDir", async () => {
+    const fc = await buildFixContext(SESSION_ID, { outputDir: tmpDir });
     expect(fc.session.id).toBe(SESSION_ID);
   });
 
@@ -905,17 +905,17 @@ describe("buildFixContext", () => {
       );
       await postProcess(dir);
 
-      const fc = buildFixContext(id, { outputDir: partTmp });
+      const fc = await buildFixContext(id, { outputDir: partTmp });
       expect(fc.session.id).toBe(id);
     } finally {
       fs.rmSync(partTmp, { recursive: true, force: true });
     }
   });
 
-  it("throws FixContextError for a missing session", () => {
-    expect(() =>
+  it("throws FixContextError for a missing session", async () => {
+    await expect(
       buildFixContext("does-not-exist", { outputDir: tmpDir }),
-    ).toThrowError(FixContextError);
+    ).rejects.toThrowError(FixContextError);
   });
 });
 

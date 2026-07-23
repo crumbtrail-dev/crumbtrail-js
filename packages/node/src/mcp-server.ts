@@ -1891,7 +1891,7 @@ export class McpServer {
       );
     }
     const comparison = await compareSessions(aDir, bDir);
-    return textResult(buildRegressionContext(comparison, bDir));
+    return textResult(await buildRegressionContext(comparison, bDir));
   }
 
   private async toolSolveContext(args: Record<string, unknown>) {
@@ -2073,7 +2073,7 @@ export class McpServer {
         // Shared locate → evidence slice (also used by the inner
         // /api/solve-context endpoint). On an inconclusive locate this returns
         // evidence: [] and the existing gaps-only path fires unchanged.
-        const located = locateEvidence(symptom, this.recallStore());
+        const located = await locateEvidence(symptom, this.recallStore());
         evidence = located.evidence;
         // Expose the locate decision on the bundle (previously dropped here).
         // method "fuzzy": this is the scored locate engine; War-game 02's
@@ -2419,12 +2419,12 @@ export class McpServer {
     if (sessionId) {
       if (!this.isSafeSessionId(sessionId))
         return errorResult("Invalid sessionId");
-      const found = store
-        .listSessions()
-        .find((session) => session.id === sessionId);
+      const found = (await store.listSessions()).find(
+        (session) => session.id === sessionId,
+      );
       if (!found) return errorResult(`Session not found: ${sessionId}`);
       const dir = found.dir;
-      profile = sessionIssueProfile(dir, store);
+      profile = await sessionIssueProfile(dir, store);
       excludeSessionId = sessionId;
       if (!profile)
         return textResult({ matches: [], indexed: false, source: "local" });
@@ -2434,7 +2434,7 @@ export class McpServer {
       return errorResult("Provide sessionId or query");
     }
 
-    const matches = recallLocal(profile, store, excludeSessionId, limit);
+    const matches = await recallLocal(profile, store, excludeSessionId, limit);
     return textResult({ matches, indexed: true, source: "local" });
   }
 

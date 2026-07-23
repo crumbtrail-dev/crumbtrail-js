@@ -145,9 +145,9 @@ export async function runFastFinalize(
   sessions: SessionManager,
   sessionId: string,
 ): Promise<FastFinalizeOutcome> {
-  const sessionDir = sessions.getExistingSessionDir(sessionId);
+  const sessionDir = await sessions.getExistingSessionDir(sessionId);
   if (!sessionDir) return "skipped";
-  const need = computeFinalizeNeed(sessionDir);
+  const need = await computeFinalizeNeed(sessionDir);
   if (!need || (!need.needsFinalize && !need.needsRefinalize)) return "skipped";
   await sessions.finalize(sessionId, { refinalize: need.needsRefinalize });
   return need.needsRefinalize ? "refinalized" : "finalized";

@@ -17,6 +17,9 @@ export class FilesystemMcpReadStore implements McpReadStore {
     return defaultSessionStore.listSessions(this.outputDir);
   }
 
+  // resolveSessionDir stays SYNC on the store (pure path resolution, no artifact
+  // bytes cross it), so this async wrapper simply returns its value.
+  // eslint-disable-next-line @typescript-eslint/require-await
   async resolveSessionDir(sessionId: string): Promise<string> {
     return defaultSessionStore.resolveSessionDir(sessionId, this.outputDir);
   }

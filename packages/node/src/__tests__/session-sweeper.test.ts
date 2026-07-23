@@ -47,8 +47,8 @@ describe("sweepIdleSessions", () => {
   });
 
   it("finalizes an idle un-finalized session so index.json exists", async () => {
-    sessions.create("auto_idle_1", { app: "svc", capture: "auto" });
-    const dir = sessions.getSessionDir("auto_idle_1");
+    await sessions.create("auto_idle_1", { app: "svc", capture: "auto" });
+    const dir = await sessions.getSessionDir("auto_idle_1");
     const eventsPath = writeEvents(dir, [
       { t: Date.now() - 3 * IDLE_MS, k: "backend.uncaught", d: {} },
     ]);
@@ -63,7 +63,7 @@ describe("sweepIdleSessions", () => {
 
     expect(result.finalized).toBe(1);
     expect(result.failed).toBe(0);
-    const finalDir = sessions.getExistingSessionDir("auto_idle_1");
+    const finalDir = await sessions.getExistingSessionDir("auto_idle_1");
     expect(finalDir).toBeDefined();
     expect(fs.existsSync(path.join(finalDir as string, "index.json"))).toBe(
       true,
@@ -72,8 +72,8 @@ describe("sweepIdleSessions", () => {
   });
 
   it("finalizes an idle session that never received any events", async () => {
-    sessions.create("auto_empty", { app: "svc", capture: "auto" });
-    const dir = sessions.getSessionDir("auto_empty");
+    await sessions.create("auto_empty", { app: "svc", capture: "auto" });
+    const dir = await sessions.getSessionDir("auto_empty");
     backdate(path.join(dir, "meta.json"), 3 * IDLE_MS);
 
     const result = await sweepIdleSessions({
@@ -83,12 +83,12 @@ describe("sweepIdleSessions", () => {
     });
 
     expect(result.finalized).toBe(1);
-    const finalDir = sessions.getExistingSessionDir("auto_empty") as string;
+    const finalDir = await sessions.getExistingSessionDir("auto_empty") as string;
     expect(fs.existsSync(path.join(finalDir, "index.json"))).toBe(true);
   });
 
   it("leaves recently-active sessions alone", async () => {
-    sessions.create("auto_active", { app: "svc" });
+    await sessions.create("auto_active", { app: "svc" });
     // meta.json mtime is "now" — well within the idle window.
 
     const result = await sweepIdleSessions({
@@ -99,17 +99,17 @@ describe("sweepIdleSessions", () => {
 
     expect(result.finalized).toBe(0);
     expect(result.active).toBe(1);
-    const dir = sessions.getSessionDir("auto_active");
+    const dir = await sessions.getSessionDir("auto_active");
     expect(fs.existsSync(path.join(dir, "index.json"))).toBe(false);
   });
 
   it("re-finalizes a finalized session that received late events", async () => {
-    sessions.create("auto_late", { app: "svc" });
-    const stagedDir = sessions.getSessionDir("auto_late");
+    await sessions.create("auto_late", { app: "svc" });
+    const stagedDir = await sessions.getSessionDir("auto_late");
     writeEvents(stagedDir, [{ t: Date.now(), k: "backend.uncaught", d: {} }]);
     await sessions.finalize("auto_late");
 
-    const dir = sessions.getExistingSessionDir("auto_late") as string;
+    const dir = await sessions.getExistingSessionDir("auto_late") as string;
     const before = JSON.parse(
       fs.readFileSync(path.join(dir, "index.json"), "utf-8"),
     );
@@ -137,8 +137,8 @@ describe("sweepIdleSessions", () => {
   });
 
   it("does not re-finalize when events have not changed since finalization", async () => {
-    sessions.create("auto_settled", { app: "svc" });
-    const stagedDir = sessions.getSessionDir("auto_settled");
+    await sessions.create("auto_settled", { app: "svc" });
+    const stagedDir = await sessions.getSessionDir("auto_settled");
     writeEvents(stagedDir, [{ t: Date.now(), k: "backend.uncaught", d: {} }]);
     await sessions.finalize("auto_settled");
 
@@ -153,8 +153,8 @@ describe("sweepIdleSessions", () => {
 
   it("caps work per sweep at maxPerSweep", async () => {
     for (const id of ["auto_a", "auto_b", "auto_c"]) {
-      sessions.create(id, { app: "svc" });
-      backdate(path.join(sessions.getSessionDir(id), "meta.json"), 3 * IDLE_MS);
+      await sessions.create(id, { app: "svc" });
+      backdate(path.join(await sessions.getSessionDir(id), "meta.json"), 3 * IDLE_MS);
     }
 
     const result = await sweepIdleSessions({
@@ -168,9 +168,9 @@ describe("sweepIdleSessions", () => {
   });
 
   it("skips sessions with corrupt meta.json", async () => {
-    sessions.create("auto_ok", { app: "svc" });
+    await sessions.create("auto_ok", { app: "svc" });
     backdate(
-      path.join(sessions.getSessionDir("auto_ok"), "meta.json"),
+      path.join(await sessions.getSessionDir("auto_ok"), "meta.json"),
       3 * IDLE_MS,
     );
     const corruptDir = path.join(tmpDir, ".sessions", "auto_corrupt");
@@ -189,8 +189,8 @@ describe("sweepIdleSessions", () => {
   });
 
   it("checkpoint-finalizes an active session older than checkpointMs", async () => {
-    sessions.create("auto_longlived", { app: "svc", capture: "auto" });
-    const dir = sessions.getSessionDir("auto_longlived");
+    await sessions.create("auto_longlived", { app: "svc", capture: "auto" });
+    const dir = await sessions.getSessionDir("auto_longlived");
     writeEvents(dir, [{ t: Date.now(), k: "backend.uncaught", d: {} }]);
     // Files were touched "just now" — the session is active, never idle.
     // Two checkpoint windows from now, age crosses the line while activity
@@ -205,17 +205,17 @@ describe("sweepIdleSessions", () => {
 
     expect(result.finalized).toBe(1);
     expect(result.active).toBe(0);
-    const finalDir = sessions.getExistingSessionDir("auto_longlived") as string;
+    const finalDir = await sessions.getExistingSessionDir("auto_longlived") as string;
     expect(fs.existsSync(path.join(finalDir, "index.json"))).toBe(true);
   });
 
   it("re-checkpoints an active finalized session once per window", async () => {
-    sessions.create("auto_rechk", { app: "svc" });
-    writeEvents(sessions.getSessionDir("auto_rechk"), [
+    await sessions.create("auto_rechk", { app: "svc" });
+    writeEvents(await sessions.getSessionDir("auto_rechk"), [
       { t: Date.now(), k: "backend.uncaught", d: {} },
     ]);
     await sessions.finalize("auto_rechk");
-    const dir = sessions.getExistingSessionDir("auto_rechk") as string;
+    const dir = await sessions.getExistingSessionDir("auto_rechk") as string;
     const before = JSON.parse(
       fs.readFileSync(path.join(dir, "index.json"), "utf-8"),
     );
@@ -251,9 +251,9 @@ describe("sweepIdleSessions", () => {
   });
 
   it("invokes onFinalized for each swept session", async () => {
-    sessions.create("auto_hook", { app: "svc" });
+    await sessions.create("auto_hook", { app: "svc" });
     backdate(
-      path.join(sessions.getSessionDir("auto_hook"), "meta.json"),
+      path.join(await sessions.getSessionDir("auto_hook"), "meta.json"),
       3 * IDLE_MS,
     );
 
@@ -277,13 +277,13 @@ describe("computeFinalizeNeed", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "crumbtrail-finneed-"));
     sessions = new SessionManager(tmpDir);
   });
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("reports needsFinalize for an un-processed session", () => {
-    sessions.create("need_new", { app: "svc" });
-    const need = computeFinalizeNeed(sessions.getSessionDir("need_new"));
+  it("reports needsFinalize for an un-processed session", async () => {
+    await sessions.create("need_new", { app: "svc" });
+    const need = await computeFinalizeNeed(await sessions.getSessionDir("need_new"));
     expect(need).toMatchObject({
       needsFinalize: true,
       needsRefinalize: false,
@@ -291,26 +291,26 @@ describe("computeFinalizeNeed", () => {
   });
 
   it("reports neither need for a settled finalized session", async () => {
-    sessions.create("need_settled", { app: "svc" });
-    writeEvents(sessions.getSessionDir("need_settled"), [
+    await sessions.create("need_settled", { app: "svc" });
+    writeEvents(await sessions.getSessionDir("need_settled"), [
       { t: Date.now(), k: "backend.uncaught", d: {} },
     ]);
     await sessions.finalize("need_settled");
 
-    const dir = sessions.getExistingSessionDir("need_settled") as string;
-    expect(computeFinalizeNeed(dir)).toMatchObject({
+    const dir = await sessions.getExistingSessionDir("need_settled") as string;
+    expect(await computeFinalizeNeed(dir)).toMatchObject({
       needsFinalize: false,
       needsRefinalize: false,
     });
   });
 
   it("reports needsRefinalize only when events land clearly past the 1s epsilon", async () => {
-    sessions.create("need_late", { app: "svc" });
-    writeEvents(sessions.getSessionDir("need_late"), [
+    await sessions.create("need_late", { app: "svc" });
+    writeEvents(await sessions.getSessionDir("need_late"), [
       { t: Date.now(), k: "backend.uncaught", d: {} },
     ]);
     await sessions.finalize("need_late");
-    const dir = sessions.getExistingSessionDir("need_late") as string;
+    const dir = await sessions.getExistingSessionDir("need_late") as string;
 
     const metaMtime = fs.statSync(path.join(dir, "meta.json")).mtime;
     const eventsPath = writeEvents(dir, [
@@ -321,25 +321,25 @@ describe("computeFinalizeNeed", () => {
     // Inside the epsilon guard band: post-process's own rewrite jitter, not
     // genuine late evidence.
     fs.utimesSync(eventsPath, metaMtime, new Date(metaMtime.getTime() + 500));
-    expect(computeFinalizeNeed(dir)).toMatchObject({
+    expect(await computeFinalizeNeed(dir)).toMatchObject({
       needsFinalize: false,
       needsRefinalize: false,
     });
 
     // Clearly later than the last finalization: late evidence.
     fs.utimesSync(eventsPath, metaMtime, new Date(metaMtime.getTime() + 1500));
-    expect(computeFinalizeNeed(dir)).toMatchObject({
+    expect(await computeFinalizeNeed(dir)).toMatchObject({
       needsFinalize: false,
       needsRefinalize: true,
     });
   });
 
-  it("returns undefined for a corrupt meta.json", () => {
+  it("returns undefined for a corrupt meta.json", async () => {
     const corruptDir = path.join(tmpDir, ".sessions", "need_corrupt");
     fs.mkdirSync(corruptDir, { recursive: true });
     fs.writeFileSync(path.join(corruptDir, "meta.json"), "{not json");
 
-    expect(computeFinalizeNeed(corruptDir)).toBeUndefined();
+    expect(await computeFinalizeNeed(corruptDir)).toBeUndefined();
   });
 });
 
@@ -350,9 +350,9 @@ describe("startSessionSweeper", () => {
     );
     try {
       const sessions = new SessionManager(tmpDir);
-      sessions.create("auto_timer", { app: "svc" });
+      await sessions.create("auto_timer", { app: "svc" });
       backdate(
-        path.join(sessions.getSessionDir("auto_timer"), "meta.json"),
+        path.join(await sessions.getSessionDir("auto_timer"), "meta.json"),
         3 * IDLE_MS,
       );
 
