@@ -6,6 +6,6 @@ import { defineConfig } from "vitest/config";
 // repository, while each package retains its own test environment and setup.
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts"],
+    projects: ["packages/*/vitest.config.ts", "scripts/release/vitest.config.ts"],
   },
 });
