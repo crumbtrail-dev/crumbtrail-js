@@ -84,9 +84,11 @@ function statMtimeMs(filePath: string): number | undefined {
   }
 }
 
-function readMeta(sessionDir: string): Record<string, unknown> | undefined {
+async function readMeta(
+  sessionDir: string,
+): Promise<Record<string, unknown> | undefined> {
   try {
-    const raw = defaultSessionStore.readArtifact(sessionDir, "meta.json");
+    const raw = await defaultSessionStore.readArtifact(sessionDir, "meta.json");
     if (!raw) return undefined;
     const parsed: unknown = JSON.parse(raw.toString("utf-8"));
     return parsed !== null &&
@@ -123,10 +125,10 @@ export interface SessionFinalizeNeed {
  * undefined when meta.json is missing/corrupt — finalize would throw the same
  * way every time, so callers should skip such sessions entirely.
  */
-export function computeFinalizeNeed(
+export async function computeFinalizeNeed(
   sessionDir: string,
-): SessionFinalizeNeed | undefined {
-  const meta = readMeta(sessionDir);
+): Promise<SessionFinalizeNeed | undefined> {
+  const meta = await readMeta(sessionDir);
   if (!meta) return undefined;
 
   const metaMtime = statMtimeMs(path.join(sessionDir, "meta.json"));
@@ -164,7 +166,7 @@ export async function sweepIdleSessions(
     active: 0,
   };
 
-  for (const { id, dir } of defaultSessionStore.listSessions(
+  for (const { id, dir } of await defaultSessionStore.listSessions(
     options.outputDir,
   )) {
     result.scanned += 1;
@@ -174,7 +176,7 @@ export async function sweepIdleSessions(
 
     // Corrupt/unreadable meta: finalize would throw the same way every tick;
     // skip rather than burn a sweep slot on it forever.
-    const need = computeFinalizeNeed(dir);
+    const need = await computeFinalizeNeed(dir);
     if (!need) continue;
 
     const { meta, metaMtime, eventsMtime, needsFinalize, needsRefinalize } =

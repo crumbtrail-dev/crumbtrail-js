@@ -88,7 +88,7 @@ export class BugQueueManager {
       );
 
       // Write events.ndjson
-      appendEvents(stagingDir, events);
+      await appendEvents(stagingDir, events);
 
       // Write meta.json for post-process compatibility
       const meta = {

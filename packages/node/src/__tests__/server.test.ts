@@ -843,7 +843,7 @@ describe("server", () => {
 
     expect(eventRes.status, JSON.stringify(eventRes.body)).toBe(200);
     expect(endRes.status, JSON.stringify(endRes.body)).toBe(200);
-    const fc = buildFixContext(findSessionDir(tmpDir, sessionId));
+    const fc = await buildFixContext(findSessionDir(tmpDir, sessionId));
     expect(fc.signals[0]).toMatchObject({
       detector: "repeated_clicks",
       anchor: {
@@ -1027,7 +1027,7 @@ describe("server", () => {
     );
     expect(JSON.stringify(storedEvents)).not.toContain("sk_fake_mobile_secret");
 
-    const fc = buildFixContext(sessionDir);
+    const fc = await buildFixContext(sessionDir);
     expect(fc.session.app).toBe("shop-expo");
     expect(fc.signals[0]).toMatchObject({
       detector: "repeated_clicks",

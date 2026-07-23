@@ -9,18 +9,18 @@ import {
 export { DEFAULT_MAX_SESSION_EVENT_BYTES };
 export type { AppendEventsOptions, AppendEventsResult };
 
-export function appendEvents(
+export async function appendEvents(
   sessionDir: string,
   events: BugEvent[],
   options: AppendEventsOptions = {},
-): AppendEventsResult {
+): Promise<AppendEventsResult> {
   return defaultSessionStore.appendEvents(sessionDir, events, options);
 }
 
-export function writeBlob(
+export async function writeBlob(
   sessionDir: string,
   name: string,
   data: Buffer,
-): void {
-  defaultSessionStore.writeBlob(sessionDir, name, data);
+): Promise<void> {
+  await defaultSessionStore.writeBlob(sessionDir, name, data);
 }

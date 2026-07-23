@@ -99,8 +99,8 @@ describe("llm bundle — db engine passthrough", () => {
     stats: { "db.diff": 3, "db.read": 2 },
   };
 
-  it("passes through an explicit engine (mssql) on diffs and reads", () => {
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+  it("passes through an explicit engine (mssql) on diffs and reads", async () => {
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
 
     const orders = bundle.databaseDiffs.find((d) => d.table === "orders");
     expect(orders).toBeDefined();
@@ -111,8 +111,8 @@ describe("llm bundle — db engine passthrough", () => {
     expect(users!.engine).toBe("mssql");
   });
 
-  it("defaults legacy engineless diffs and reads to postgres", () => {
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+  it("defaults legacy engineless diffs and reads to postgres", async () => {
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
 
     const carts = bundle.databaseDiffs.find((d) => d.table === "carts");
     expect(carts).toBeDefined();
@@ -123,8 +123,8 @@ describe("llm bundle — db engine passthrough", () => {
     expect(sessions!.engine).toBe("postgres");
   });
 
-  it("surfaces an image-less statement-level fallback with rowCount and its engine", () => {
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+  it("surfaces an image-less statement-level fallback with rowCount and its engine", async () => {
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
 
     const auditLog = bundle.databaseDiffs.find((d) => d.table === "audit_log");
     expect(auditLog).toBeDefined();

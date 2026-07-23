@@ -30,8 +30,8 @@ describe('positioning language on compare surfaces', () => {
     assertClean(formatComparisonSummary(CLEAN_FIXTURE));
   });
 
-  it('regression-context hints contain no banned phrases', () => {
-    const ctx = buildRegressionContext(REGRESSION_FIXTURE, '/nonexistent-session-dir');
+  it('regression-context hints contain no banned phrases', async () => {
+    const ctx = await buildRegressionContext(REGRESSION_FIXTURE, '/nonexistent-session-dir');
     assertClean(JSON.stringify(ctx.causal_window?.hints ?? []) + ctx.repro_hint);
   });
 });

@@ -1,8 +1,7 @@
-import fs from "node:fs";
-import path from "node:path";
 import type { Divergence, EnvDiff, SessionComparison } from "./index";
 import { comparisonTitle } from "./report";
 import { buildFixContext } from "../fix-context";
+import { defaultSessionStore } from "../session-store";
 
 export const REGRESSION_CONTEXT_SCHEMA_VERSION =
   "regression-context.v1" as const;
@@ -38,22 +37,27 @@ export interface RegressionContext {
   repro_hint: string;
 }
 
-export function buildRegressionContext(
+export async function buildRegressionContext(
   comparison: SessionComparison,
   bDir: string,
-): RegressionContext {
+): Promise<RegressionContext> {
+  const reproHintText = await reproHint(bDir);
   const requestIds = unique(
     comparison.divergences.map((d) => d.requestId).filter(isString),
   );
-  const times = requestIds.flatMap((requestId) =>
-    requestTimesFromIndex(bDir, requestId),
-  );
+  const times = (
+    await Promise.all(
+      requestIds.map((requestId) => requestTimesFromIndex(bDir, requestId)),
+    )
+  ).flat();
   const firstSig = comparison.divergences.map((d) => d.sig).find(isString);
   return {
     schemaVersion: REGRESSION_CONTEXT_SCHEMA_VERSION,
     title: comparisonTitle(comparison),
     comparison,
-    divergent_interaction: firstSig ? interactionForSig(bDir, firstSig) : null,
+    divergent_interaction: firstSig
+      ? await interactionForSig(bDir, firstSig)
+      : null,
     causal_window:
       requestIds.length > 0
         ? {
@@ -75,15 +79,15 @@ export function buildRegressionContext(
         after: d.after,
       })),
     env_delta: comparison.envDelta ?? null,
-    repro_hint: reproHint(bDir),
+    repro_hint: reproHintText,
   };
 }
 
-function interactionForSig(
+async function interactionForSig(
   sessionDir: string,
   sig: string,
-): RegressionContext["divergent_interaction"] {
-  const signatures = readSignatures(sessionDir);
+): Promise<RegressionContext["divergent_interaction"]> {
+  const signatures = await readSignatures(sessionDir);
   const signature = signatures.find((entry) => entry.sig === sig);
   return {
     sig,
@@ -92,10 +96,18 @@ function interactionForSig(
   };
 }
 
-function readSignatures(sessionDir: string): Record<string, unknown>[] {
-  const filePath = path.join(sessionDir, "signatures.json");
+// Reads via the SessionStore seam: signatures.json is a finalize-time cold
+// artifact, so under at-rest encryption fs would hand back an envelope.
+async function readSignatures(
+  sessionDir: string,
+): Promise<Record<string, unknown>[]> {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const raw = await defaultSessionStore.readArtifact(
+      sessionDir,
+      "signatures.json",
+    );
+    if (!raw) return [];
+    const parsed = JSON.parse(raw.toString("utf-8")) as unknown;
     return isRecord(parsed) && Array.isArray(parsed.entries)
       ? parsed.entries.filter(isRecord)
       : [];
@@ -104,14 +116,15 @@ function readSignatures(sessionDir: string): Record<string, unknown>[] {
   }
 }
 
-function requestTimesFromIndex(
+async function requestTimesFromIndex(
   sessionDir: string,
   requestId: string,
-): number[] {
-  const indexPath = path.join(sessionDir, "index.json");
+): Promise<number[]> {
   let index: unknown;
   try {
-    index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+    const raw = await defaultSessionStore.readArtifact(sessionDir, "index.json");
+    if (!raw) return [];
+    index = JSON.parse(raw.toString("utf-8"));
   } catch {
     return [];
   }
@@ -141,9 +154,9 @@ function collectRefTimes(value: unknown, times: number[]): void {
   }
 }
 
-function reproHint(sessionDir: string): string {
+async function reproHint(sessionDir: string): Promise<string> {
   try {
-    const context = buildFixContext(sessionDir);
+    const context = await buildFixContext(sessionDir);
     return (
       context.repro_hint?.title ?? "Replay the same recorded flow in session B."
     );

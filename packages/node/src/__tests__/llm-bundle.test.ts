@@ -26,7 +26,7 @@ describe("llm bundle", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("surfaces bounded request bodies for numeric-id network errors in every output", () => {
+  it("surfaces bounded request bodies for numeric-id network errors in every output", async () => {
     const oversizedBodySecret = "oversized-body-secret";
     const requestBody = `apiKey=${oversizedBodySecret}&note=${"x".repeat(5_000)}`;
     const events: BugEvent[] = [
@@ -72,7 +72,7 @@ describe("llm bundle", () => {
       stats: { "net.req": 1, "net.err": 1 },
     };
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index,
@@ -84,7 +84,7 @@ describe("llm bundle", () => {
       path.join(tmpDir, "windows", `${networkError!.id}.md`),
       "utf-8",
     );
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
     const failedEntry = bundle.agentContext.timeline.find(
       (entry) => entry.kind === "failed-request",
@@ -226,7 +226,7 @@ describe("llm bundle", () => {
     }
   });
 
-  it("associates same-millisecond response bodies using numeric and string request ids", () => {
+  it("associates same-millisecond response bodies using numeric and string request ids", async () => {
     const responseTime = 1_700_000_301_000;
     const events: BugEvent[] = [
       {
@@ -284,12 +284,12 @@ describe("llm bundle", () => {
       ],
     };
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index,
     });
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events,
       index,
@@ -324,7 +324,7 @@ describe("llm bundle", () => {
     expect(windows).toContain("Response body: string-response-body");
   });
 
-  it("adds redacted click and input interactions plus an aggregate key count to agent context", () => {
+  it("adds redacted click and input interactions plus an aggregate key count to agent context", async () => {
     const rawInput = "do-not-leak-this-input-value";
     const selectorValueSecret = "hunter2-selector-secret";
     const longSelector = `${".checkout-field".repeat(32)}[raw-input-value='${selectorValueSecret}`;
@@ -377,7 +377,7 @@ describe("llm bundle", () => {
       stats: { clk: 1, key: 27, inp: 1, err: 1 },
     };
 
-    const candidates = writeEvidenceIndex({
+    const candidates = await writeEvidenceIndex({
       sessionDir: tmpDir,
       events,
       index,
@@ -389,7 +389,7 @@ describe("llm bundle", () => {
       path.join(tmpDir, "windows", `${errorCandidate!.id}.md`),
       "utf-8",
     );
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
     const interactivePath = bundle.browserEvidence.interactiveElements.find(
       (element) => element.sig === "account-input",
@@ -427,7 +427,7 @@ describe("llm bundle", () => {
     expect(interactivePath).not.toContain(selectorValueSecret);
   });
 
-  it("preserves only minted and W3C correlation ids while redacting token shaped values", () => {
+  it("preserves only minted and W3C correlation ids while redacting token shaped values", async () => {
     const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
     const requestId = "req_m9z4x9_abcdefghijkl";
     const sessionId = "ses_20260715_123456_abcdef123456";
@@ -520,7 +520,7 @@ describe("llm bundle", () => {
       },
     };
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     expect(bundle.databaseDiffs.map((diff) => diff.requestId)).toEqual([
       traceId,
       requestId,
@@ -537,7 +537,7 @@ describe("llm bundle", () => {
     expect(serialized).toContain("[REDACTED]");
   });
 
-  it("surfaces a redaction-aware environment snapshot merged from env events", () => {
+  it("surfaces a redaction-aware environment snapshot merged from env events", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_100_000,
@@ -576,7 +576,7 @@ describe("llm bundle", () => {
       stats: { env: 2, "session.lifecycle": 1 },
     };
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
 
     expect(bundle.environment).not.toBeNull();
     expect(bundle.environment!.browser).toEqual({
@@ -598,7 +598,7 @@ describe("llm bundle", () => {
     ]);
   });
 
-  it("defaults environment to null when no env events are present", () => {
+  it("defaults environment to null when no env events are present", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_200_000,
@@ -615,11 +615,11 @@ describe("llm bundle", () => {
       evts: 1,
       stats: { "session.lifecycle": 1 },
     };
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     expect(bundle.environment).toBeNull();
   });
 
-  it("summarizes capture gaps into deterministic completeness grades", () => {
+  it("summarizes capture gaps into deterministic completeness grades", async () => {
     const start = 1_700_000_250_000;
     const degradedEvents: BugEvent[] = [
       {
@@ -669,7 +669,7 @@ describe("llm bundle", () => {
     };
 
     expect(
-      writeLlmBundle({ sessionDir: tmpDir, events: degradedEvents, index })
+      (await writeLlmBundle({ sessionDir: tmpDir, events: degradedEvents, index }))
         .completeness,
     ).toEqual({
       gapCount: 2,
@@ -678,14 +678,14 @@ describe("llm bundle", () => {
       grade: "degraded",
     });
 
-    const fragmentary = writeLlmBundle({
+    const fragmentary = await writeLlmBundle({
       sessionDir: tmpDir,
       events: degradedEvents.filter((event) => event.k === "capture_gap"),
       index: { ...index, evts: 2 },
     });
     expect(fragmentary.completeness.grade).toBe("fragmentary");
 
-    const complete = writeLlmBundle({
+    const complete = await writeLlmBundle({
       sessionDir: tmpDir,
       events: [{ t: start, k: "nav", d: {} }],
       index: { ...index, evts: 1 },
@@ -696,7 +696,7 @@ describe("llm bundle", () => {
     });
   });
 
-  it("surfaces OTel DB activity as statements, not row diffs", () => {
+  it("surfaces OTel DB activity as statements, not row diffs", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_300_000,
@@ -724,7 +724,7 @@ describe("llm bundle", () => {
       evts: 1,
       stats: { "backend.otel.span": 1 },
     };
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     expect(bundle.databaseActivity).toHaveLength(1);
     expect(bundle.databaseActivity[0]).toMatchObject({
       evidenceType: "otel_db_activity_statements_not_row_diffs",
@@ -746,7 +746,7 @@ describe("llm bundle", () => {
     );
   });
 
-  it("writes agent-first JSON and markdown with artifacts, timeline, redaction, and degradation summaries", () => {
+  it("writes agent-first JSON and markdown with artifacts, timeline, redaction, and degradation summaries", async () => {
     const secret = "sk_abcdefghijklmnopqrstuvwxyz";
     const events: BugEvent[] = [
       {
@@ -932,7 +932,7 @@ describe("llm bundle", () => {
       JSON.stringify({ transcriptionRequested: true }),
     );
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const persisted = JSON.parse(
       fs.readFileSync(path.join(tmpDir, "llm.json"), "utf-8"),
     );
@@ -1020,7 +1020,7 @@ describe("llm bundle", () => {
     expect(serializedBundle).not.toContain(secret);
   });
 
-  it("reports expected missing media as limitations instead of successful capture", () => {
+  it("reports expected missing media as limitations instead of successful capture", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_001_000,
@@ -1079,7 +1079,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
 
     expect(bundle.media.video).toMatchObject({
@@ -1118,7 +1118,7 @@ describe("llm bundle", () => {
     expect(markdown).toContain("audio.webm is missing");
   });
 
-  it("highlights performance and storage evidence without exposing raw page secrets", () => {
+  it("highlights performance and storage evidence without exposing raw page secrets", async () => {
     const secret = "sk_fake_abcdefghijklmnopqrstuvwxyz";
     const embeddedSecret = `auth_${secret}`;
     const events: BugEvent[] = [
@@ -1184,7 +1184,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
     const serialized = JSON.stringify(bundle) + markdown;
 
@@ -1213,7 +1213,7 @@ describe("llm bundle", () => {
     expect(serialized).not.toContain("authToken=" + secret);
   });
 
-  it("summarizes page probe, console, request failure, and boundary evidence", () => {
+  it("summarizes page probe, console, request failure, and boundary evidence", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_002_000,
@@ -1339,7 +1339,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
     const serialized = JSON.stringify(bundle) + markdown;
 
@@ -1379,7 +1379,7 @@ describe("llm bundle", () => {
     expect(serialized).not.toContain("/private");
   });
 
-  it("selects identical summaries from an index-only vs an event-only lane", () => {
+  it("selects identical summaries from an index-only vs an event-only lane", async () => {
     const t = 1_700_000_500_100;
     const start = 1_700_000_500_000;
     const netFields = {
@@ -1432,12 +1432,12 @@ describe("llm bundle", () => {
       tabBoundaries: [],
     };
 
-    const fromIndex = writeLlmBundle({
+    const fromIndex = await writeLlmBundle({
       sessionDir: fs.mkdtempSync(path.join(tmpDir, "idx-")),
       events: indexOnlyEvents,
       index: indexOnly,
     });
-    const fromEvents = writeLlmBundle({
+    const fromEvents = await writeLlmBundle({
       sessionDir: fs.mkdtempSync(path.join(tmpDir, "evt-")),
       events: eventOnlyEvents,
       index: eventOnly,
@@ -1453,7 +1453,7 @@ describe("llm bundle", () => {
     expect(fromIndex.browserEvidence.tabBoundaries.decisions).toHaveLength(1);
   });
 
-  it("renders sanitized full-stack request evidence in JSON and markdown with gap limitations", () => {
+  it("renders sanitized full-stack request evidence in JSON and markdown with gap limitations", async () => {
     const secret = "sk_abcdefghijklmnopqrstuvwxyz";
     const events: BugEvent[] = [
       {
@@ -1552,7 +1552,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const persisted = JSON.parse(
       fs.readFileSync(path.join(tmpDir, "llm.json"), "utf-8"),
     );
@@ -1605,7 +1605,7 @@ describe("llm bundle", () => {
     expect(serialized).not.toContain("Bearer sk_");
   });
 
-  it("caps full-stack JSON summaries at 40 and markdown tables at 10 while preserving totals", () => {
+  it("caps full-stack JSON summaries at 40 and markdown tables at 10 while preserving totals", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_004_000,
@@ -1674,7 +1674,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
 
     expect(bundle.fullStackEvidence.summary).toMatchObject({
@@ -1695,7 +1695,7 @@ describe("llm bundle", () => {
     expect(markdown).not.toContain("gap-10");
   });
 
-  it("handles absent or malformed full-stack request index entries without crashing", () => {
+  it("handles absent or malformed full-stack request index entries without crashing", async () => {
     const events: BugEvent[] = [
       {
         t: 1_700_000_005_000,
@@ -1735,7 +1735,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
 
     expect(bundle.fullStackEvidence.summary).toMatchObject({
@@ -1750,7 +1750,7 @@ describe("llm bundle", () => {
     expect(markdown).toContain("Linked request moments: 1");
   });
 
-  it("summarizes tab boundary root current candidate prompt outcomes with caps and redaction", () => {
+  it("summarizes tab boundary root current candidate prompt outcomes with caps and redaction", async () => {
     const secret = "sk_fake_abcdefghijklmnopqrstuvwxyz";
     const events: BugEvent[] = [
       {
@@ -1850,7 +1850,7 @@ describe("llm bundle", () => {
     );
     fs.writeFileSync(path.join(tmpDir, "index.json"), JSON.stringify(index));
 
-    const bundle = writeLlmBundle({ sessionDir: tmpDir, events, index });
+    const bundle = await writeLlmBundle({ sessionDir: tmpDir, events, index });
     const markdown = fs.readFileSync(path.join(tmpDir, "llm.md"), "utf-8");
     const serialized = JSON.stringify(bundle) + markdown;
 
@@ -1947,18 +1947,21 @@ describe("llm bundle distinct-bug flag-note titles", () => {
     return events.sort((a, b) => a.t - b.t);
   }
 
-  function buildBundle(events: BugEvent[], candidates: EvidenceCandidate[]) {
+  async function buildBundle(
+    events: BugEvent[],
+    candidates: EvidenceCandidate[],
+  ) {
     const index: SessionIndexLike = {
       id: "ses_flag",
       start: BASE,
       end: BASE + 5000,
     };
-    return writeLlmBundle({ sessionDir: tmpDir, events, index, candidates });
+    return await writeLlmBundle({ sessionDir: tmpDir, events, index, candidates });
   }
 
-  it("replaces a degraded title with the user's in-window flag note", () => {
+  it("replaces a degraded title with the user's in-window flag note", async () => {
     const note = "Checkout dies with a 500 every time I hit Pay";
-    const bundle = buildBundle(sessionEvents({ t: BASE + 1005, note }), [
+    const bundle = await buildBundle(sessionEvents({ t: BASE + 1005, note }), [
       degradedCandidate(),
     ]);
 
@@ -1970,8 +1973,8 @@ describe("llm bundle distinct-bug flag-note titles", () => {
     );
   });
 
-  it("leaves a degraded title unchanged when the flag note is outside the bug window", () => {
-    const bundle = buildBundle(
+  it("leaves a degraded title unchanged when the flag note is outside the bug window", async () => {
+    const bundle = await buildBundle(
       sessionEvents({ t: BASE + 60_000, note: "Way later, unrelated flag" }),
       [degradedCandidate()],
     );
@@ -1982,8 +1985,8 @@ describe("llm bundle distinct-bug flag-note titles", () => {
     );
   });
 
-  it("never overrides a healthy title with a flag note", () => {
-    const bundle = buildBundle(
+  it("never overrides a healthy title with a flag note", async () => {
+    const bundle = await buildBundle(
       sessionEvents({ t: BASE + 1005, note: "My own words about the bug" }),
       [
         candidate({
@@ -1999,13 +2002,13 @@ describe("llm bundle distinct-bug flag-note titles", () => {
     expect(bundle.distinctBugs[0].title).toBe("HTTP 500 from POST /api/pay");
   });
 
-  it("truncates long flag notes with the shared text helper", () => {
+  it("truncates long flag notes with the shared text helper", async () => {
     const note =
       "The checkout page completely falls over whenever I press the pay button " +
       "and then the whole cart empties itself and I have to start over again";
     expect(note.length).toBeGreaterThan(100);
 
-    const bundle = buildBundle(sessionEvents({ t: BASE + 1005, note }), [
+    const bundle = await buildBundle(sessionEvents({ t: BASE + 1005, note }), [
       degradedCandidate(),
     ]);
 
@@ -2045,7 +2048,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     };
   }
 
-  it("collapses same-signature failed requests into one verbatim exemplar with count/firstAt/lastAt", () => {
+  it("collapses same-signature failed requests into one verbatim exemplar with count/firstAt/lastAt", async () => {
     const url = (id: number) =>
       `https://api.example.test/orders/${id}/pay?token=[REDACTED]`;
     const run = [
@@ -2067,7 +2070,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
       ],
     });
 
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index,
@@ -2087,11 +2090,13 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
 
     // The exemplar is a verbatim copy of the earliest entry's already-redacted summary:
     // strip the three annotations and it must equal a solo build of that same entry.
-    const solo = writeLlmBundle({
-      sessionDir: fs.mkdtempSync(path.join(tmpDir, "solo-")),
-      events: startEvents,
-      index: baseIndex({ failedReqs: [run[0]] }),
-    }).browserEvidence.failedRequests[0];
+    const solo = (
+      await writeLlmBundle({
+        sessionDir: fs.mkdtempSync(path.join(tmpDir, "solo-")),
+        events: startEvents,
+        index: baseIndex({ failedReqs: [run[0]] }),
+      })
+    ).browserEvidence.failedRequests[0];
     const { count, firstAt, lastAt, ...exemplarRest } = summaries[0];
     expect(exemplarRest).toEqual(solo);
 
@@ -2102,7 +2107,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     expect(summaries[1]).not.toHaveProperty("lastAt");
   });
 
-  it("compacts network-error runs and keeps distinct signatures separate and stably ordered", () => {
+  it("compacts network-error runs and keeps distinct signatures separate and stably ordered", async () => {
     const offline = {
       method: "GET",
       url: "https://api.example.test/offline",
@@ -2124,7 +2129,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
       ],
     });
 
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index,
@@ -2147,7 +2152,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     expect(entries[1]).not.toHaveProperty("count");
   });
 
-  it("compacts console-error runs whose messages differ only by digits, keying on level+message+source", () => {
+  it("compacts console-error runs whose messages differ only by digits, keying on level+message+source", async () => {
     const index = baseIndex({
       consoleErrors: [
         {
@@ -2174,7 +2179,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
       ],
     });
 
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index,
@@ -2196,7 +2201,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     expect(entries[1]).not.toHaveProperty("count");
   });
 
-  it("applies the cap of 40 to exemplars, not raw duplicates", () => {
+  it("applies the cap of 40 to exemplars, not raw duplicates", async () => {
     const failedReqs = Array.from({ length: 50 }, (_, i) => ({
       t: START + 100 + i,
       m: i % 2 === 0 ? "GET" : "POST",
@@ -2208,7 +2213,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     }));
     const index = baseIndex({ failedReqs });
 
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index,
@@ -2233,7 +2238,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     });
   });
 
-  it("stamps firstErrorEventAt and detectToBundleMs beside generatedAt when error-class evidence exists", () => {
+  it("stamps firstErrorEventAt and detectToBundleMs beside generatedAt when error-class evidence exists", async () => {
     const index = baseIndex({
       errs: [{ t: START + 50, msg: "boom" }],
       failedReqs: [
@@ -2246,7 +2251,7 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
       ],
     });
 
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index,
@@ -2269,11 +2274,11 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     );
   });
 
-  it("clamps detectToBundleMs to zero (never negative or NaN) when the clock reads earlier than the first error", () => {
+  it("clamps detectToBundleMs to zero (never negative or NaN) when the clock reads earlier than the first error", async () => {
     vi.spyOn(Date, "now").mockReturnValue(START - 10_000);
     const index = baseIndex({ errs: [{ t: START + 50, msg: "boom" }] });
 
-    const bundle = writeLlmBundle({
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index,
@@ -2284,8 +2289,8 @@ describe("llm bundle run compaction and detect-to-bundle latency", () => {
     expect(Number.isNaN(bundle.detectToBundleMs)).toBe(false);
   });
 
-  it("omits both latency keys entirely when the session has no error-class events", () => {
-    const bundle = writeLlmBundle({
+  it("omits both latency keys entirely when the session has no error-class events", async () => {
+    const bundle = await writeLlmBundle({
       sessionDir: tmpDir,
       events: startEvents,
       index: baseIndex({}),

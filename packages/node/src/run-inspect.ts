@@ -32,7 +32,7 @@ export async function runInspect(rest: string[]): Promise<number> {
 
   let inspection: SessionInspection;
   try {
-    inspection = inspectSession(resolveTarget(target), { outputDir });
+    inspection = await inspectSession(resolveTarget(target), { outputDir });
   } catch (err) {
     if (err instanceof InspectError) {
       process.stderr.write(`crumbtrail-server inspect: ${err.message}\n`);

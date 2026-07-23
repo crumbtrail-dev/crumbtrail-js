@@ -7,19 +7,19 @@ import { appendEvents, writeBlob } from "../writer";
 
 describe("appendEvents", () => {
   let tmpDir: string;
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "crumbtrail-writer-"));
   });
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("creates events.ndjson with one JSON object per line", () => {
+  it("creates events.ndjson with one JSON object per line", async () => {
     const events = [
       { t: 1000, k: "con", d: { lv: "log", args: ['"hello"'] } },
       { t: 1001, k: "err", d: { msg: "oops" } },
     ];
-    appendEvents(tmpDir, events);
+    await appendEvents(tmpDir, events);
     const content = fs.readFileSync(
       path.join(tmpDir, "events.ndjson"),
       "utf-8",
@@ -30,9 +30,9 @@ describe("appendEvents", () => {
     expect(JSON.parse(lines[1])).toEqual(events[1]);
   });
 
-  it("appends to existing file without overwriting", () => {
-    appendEvents(tmpDir, [{ t: 1, k: "a", d: {} }]);
-    appendEvents(tmpDir, [{ t: 2, k: "b", d: {} }]);
+  it("appends to existing file without overwriting", async () => {
+    await appendEvents(tmpDir, [{ t: 1, k: "a", d: {} }]);
+    await appendEvents(tmpDir, [{ t: 2, k: "b", d: {} }]);
     const content = fs.readFileSync(
       path.join(tmpDir, "events.ndjson"),
       "utf-8",
@@ -43,8 +43,8 @@ describe("appendEvents", () => {
     expect(JSON.parse(lines[1]).k).toBe("b");
   });
 
-  it("produces no extra whitespace in JSON", () => {
-    appendEvents(tmpDir, [{ t: 1, k: "a", d: { key: "value" } }]);
+  it("produces no extra whitespace in JSON", async () => {
+    await appendEvents(tmpDir, [{ t: 1, k: "a", d: { key: "value" } }]);
     const content = fs.readFileSync(
       path.join(tmpDir, "events.ndjson"),
       "utf-8",
@@ -54,9 +54,9 @@ describe("appendEvents", () => {
     expect(line).toBe('{"t":1,"k":"a","d":{"key":"value"}}');
   });
 
-  it("redacts secrets before appending events while preserving correlation ids", () => {
+  it("redacts secrets before appending events while preserving correlation ids", async () => {
     const secret = "sk_fake_rawappendabcdefghijklmnopqrstuvwxyz";
-    appendEvents(tmpDir, [
+    await appendEvents(tmpDir, [
       {
         t: 1,
         k: "net.req",
@@ -106,7 +106,7 @@ describe("appendEvents", () => {
     expect(persisted.d.el.path).toBe(`button[data-token="${REDACTED_VALUE}"]`);
   });
 
-  it("stops appending and marks the session when the event byte cap is reached", () => {
+  it("stops appending and marks the session when the event byte cap is reached", async () => {
     const first = { t: 1, k: "a", d: { msg: "fits" } };
     const second = {
       t: 2,
@@ -123,10 +123,10 @@ describe("appendEvents", () => {
       "utf-8",
     );
 
-    const result = appendEvents(tmpDir, [first, second, third], {
+    const result = await appendEvents(tmpDir, [first, second, third], {
       maxEventBytes: firstLineBytes + 1,
     });
-    const followup = appendEvents(
+    const followup = await appendEvents(
       tmpDir,
       [{ t: 4, k: "d", d: { msg: "ignored after truncation" } }],
       { maxEventBytes: firstLineBytes + 1000 },
@@ -174,9 +174,9 @@ describe("writeBlob", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("writes binary data to named file in session dir", () => {
+  it("writes binary data to named file in session dir", async () => {
     const data = Buffer.from([0x00, 0x01, 0x02, 0xff]);
-    writeBlob(tmpDir, "recording.webm", data);
+    await writeBlob(tmpDir, "recording.webm", data);
     const written = fs.readFileSync(path.join(tmpDir, "recording.webm"));
     expect(Buffer.compare(written, data)).toBe(0);
   });

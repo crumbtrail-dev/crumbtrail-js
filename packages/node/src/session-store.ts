@@ -47,23 +47,32 @@ export interface ResolveSessionScope {
  * alternate backend (e.g. R2) without touching call sites.
  */
 export interface SessionStore {
-  createSessionDir(sessionId: string): string;
+  createSessionDir(sessionId: string): Promise<string>;
   appendEvents(
     sessionDir: string,
     events: BugEvent[],
     opts?: AppendEventsOptions,
-  ): AppendEventsResult;
-  writeArtifact(sessionDir: string, name: string, data: string | Buffer): void;
-  writeBlob(sessionDir: string, name: string, data: Buffer): void;
+  ): Promise<AppendEventsResult>;
+  writeArtifact(
+    sessionDir: string,
+    name: string,
+    data: string | Buffer,
+  ): Promise<void>;
+  writeBlob(sessionDir: string, name: string, data: Buffer): Promise<void>;
   writeSessionArtifact(
     sessionDir: string,
     name: string,
     data: string | Buffer,
-  ): void;
-  readArtifact(sessionDir: string, name: string): Buffer | undefined;
-  statArtifact(sessionDir: string, name: string): ArtifactStat | undefined;
-  listSessions(outputDir: string): Array<{ id: string; dir: string }>;
-  listArtifacts(sessionDir: string): string[];
+  ): Promise<void>;
+  readArtifact(sessionDir: string, name: string): Promise<Buffer | undefined>;
+  statArtifact(
+    sessionDir: string,
+    name: string,
+  ): Promise<ArtifactStat | undefined>;
+  listSessions(
+    outputDir: string,
+  ): Promise<Array<{ id: string; dir: string }>>;
+  listArtifacts(sessionDir: string): Promise<string[]>;
   /**
    * Atomically relocate `sessionDir` to `targetDir` (staging -> finalized partition).
    * This is the load-bearing FS-only "atomic rename" semantic the R2 adapter will have
@@ -71,7 +80,7 @@ export interface SessionStore {
    * after the move (see SessionManager.moveSessionToV2Partition); this primitive owns
    * only the atomic move itself.
    */
-  moveToPartition(sessionDir: string, targetDir: string): string;
+  moveToPartition(sessionDir: string, targetDir: string): Promise<string>;
   resolveSessionDir(
     idOrDir: string,
     outputDir?: string,
@@ -88,11 +97,12 @@ export interface SessionStore {
     app: string,
     sessionId: string,
   ): string | undefined;
-  deleteSessionDir(sessionDir: string): void;
+  deleteSessionDir(sessionDir: string): Promise<void>;
 }
 
 export class FilesystemSessionStore implements SessionStore {
-  createSessionDir(sessionId: string): string {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async createSessionDir(sessionId: string): Promise<string> {
     fs.mkdirSync(sessionId, { recursive: true, mode: PRIVATE_DIR_MODE });
     if (process.platform !== "win32") {
       fs.chmodSync(sessionId, PRIVATE_DIR_MODE);
@@ -100,11 +110,18 @@ export class FilesystemSessionStore implements SessionStore {
     return sessionId;
   }
 
-  appendEvents(
+  // The append sequence stays fully synchronous inside this async method: an
+  // async function with no internal `await` runs its body to completion on the
+  // calling tick, so the single-writer marker/byte-cap check and the appendFile
+  // can never interleave with another append. The `async` keyword only satisfies
+  // the async SessionStore contract (whose real async work lives in the cloud
+  // EncryptedSessionStore decorator, not here).
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async appendEvents(
     sessionDir: string,
     events: BugEvent[],
     opts: AppendEventsOptions = {},
-  ): AppendEventsResult {
+  ): Promise<AppendEventsResult> {
     const filePath = path.join(sessionDir, "events.ndjson");
     const maxEventBytes = opts.maxEventBytes ?? DEFAULT_MAX_SESSION_EVENT_BYTES;
     const markerPath = path.join(sessionDir, CAPTURE_TRUNCATED_ARTIFACT);
@@ -157,18 +174,30 @@ export class FilesystemSessionStore implements SessionStore {
     return { accepted: acceptedLines.length, dropped, truncated, bytesWritten };
   }
 
-  writeArtifact(sessionDir: string, name: string, data: string | Buffer): void {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async writeArtifact(
+    sessionDir: string,
+    name: string,
+    data: string | Buffer,
+  ): Promise<void> {
+    // One optional subdirectory level is allowed (`windows/cand_0001.md` is a
+    // real finalize artifact); each segment still has to be a plain safe name,
+    // and the realpath containment check below is what actually enforces the
+    // boundary.
+    const segments = name.split("/");
     if (
-      !/^[A-Za-z0-9._-]+$/.test(name) ||
       name.includes("..") ||
-      name.includes("/")
+      segments.length > 2 ||
+      segments.some((segment) => !/^[A-Za-z0-9._-]+$/.test(segment))
     ) {
       throw new Error(`Invalid generated artifact name: ${name}`);
     }
     const root = fs.realpathSync(sessionDir);
     const target = path.resolve(root, name);
+    const expectedParent =
+      segments.length === 2 ? path.join(root, segments[0] as string) : root;
     const parent = fs.realpathSync(path.dirname(target));
-    if (parent !== root)
+    if (parent !== expectedParent)
       throw new Error(
         `Generated artifact parent escaped session directory: ${name}`,
       );
@@ -180,12 +209,22 @@ export class FilesystemSessionStore implements SessionStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
-    const tmp = path.join(root, `.${name}.${process.pid}.${Date.now()}.tmp`);
+    // Staged inside the SAME directory as the target so the rename stays a
+    // single-filesystem atomic operation.
+    const tmp = path.join(
+      parent,
+      `.${path.basename(name)}.${process.pid}.${Date.now()}.tmp`,
+    );
     fs.writeFileSync(tmp, data, { flag: "wx" });
     fs.renameSync(tmp, target);
   }
 
-  writeBlob(sessionDir: string, name: string, data: Buffer): void {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async writeBlob(
+    sessionDir: string,
+    name: string,
+    data: Buffer,
+  ): Promise<void> {
     const filePath = path.join(sessionDir, name);
     assertNotSymlink(filePath);
     fs.writeFileSync(filePath, data);
@@ -194,17 +233,22 @@ export class FilesystemSessionStore implements SessionStore {
   // Non-atomic guarded write used for meta.json and other SessionManager-authored
   // artifacts. Relocated verbatim from SessionManager.writeSessionArtifact so the
   // realpath/symlink containment (assertWritableSessionArtifactPath) lives behind the seam.
-  writeSessionArtifact(
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async writeSessionArtifact(
     sessionDir: string,
     name: string,
     data: string | Buffer,
-  ): void {
+  ): Promise<void> {
     const filePath = path.join(sessionDir, name);
     assertWritableSessionArtifactPath(sessionDir, filePath);
     fs.writeFileSync(filePath, data);
   }
 
-  readArtifact(sessionDir: string, name: string): Buffer | undefined {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async readArtifact(
+    sessionDir: string,
+    name: string,
+  ): Promise<Buffer | undefined> {
     const filePath = path.join(sessionDir, name);
     try {
       if (fs.lstatSync(filePath).isSymbolicLink()) {
@@ -217,7 +261,11 @@ export class FilesystemSessionStore implements SessionStore {
     return fs.readFileSync(filePath);
   }
 
-  statArtifact(sessionDir: string, name: string): ArtifactStat | undefined {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async statArtifact(
+    sessionDir: string,
+    name: string,
+  ): Promise<ArtifactStat | undefined> {
     const filePath = path.join(sessionDir, name);
     try {
       const stat = fs.statSync(filePath);
@@ -232,7 +280,10 @@ export class FilesystemSessionStore implements SessionStore {
   // partition tree under outputDir applying realpath/symlink containment, returning every
   // directory that holds a valid meta.json. Relocated verbatim from SessionManager.eachSessionDir
   // so the whole-tree lookup lives behind the seam alongside the scoped lookup.
-  listSessions(outputDir: string): Array<{ id: string; dir: string }> {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async listSessions(
+    outputDir: string,
+  ): Promise<Array<{ id: string; dir: string }>> {
     const found: Array<{ id: string; dir: string }> = [];
     if (!fs.existsSync(outputDir)) return found;
     // Resolve the output root through any symlinks too (macOS, for example, exposes
@@ -292,7 +343,8 @@ export class FilesystemSessionStore implements SessionStore {
 
   // Immediate, non-symlink file entries of a session directory. Symlinked entries are
   // skipped defensively so a crafted session dir cannot surface artifacts outside itself.
-  listArtifacts(sessionDir: string): string[] {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async listArtifacts(sessionDir: string): Promise<string[]> {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(sessionDir, { withFileTypes: true });
@@ -307,7 +359,14 @@ export class FilesystemSessionStore implements SessionStore {
     return names;
   }
 
-  moveToPartition(sessionDir: string, targetDir: string): string {
+  // Kept synchronous inside the async wrapper: renameSync IS the atomic move,
+  // and interposing an await before it would widen the window in which the
+  // caller's pre-move containment checks could go stale.
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async moveToPartition(
+    sessionDir: string,
+    targetDir: string,
+  ): Promise<string> {
     fs.renameSync(sessionDir, targetDir);
     return targetDir;
   }
@@ -346,7 +405,8 @@ export class FilesystemSessionStore implements SessionStore {
     return findScopedSessionDir(sessionId, sessionsDir, { tenant, app });
   }
 
-  deleteSessionDir(sessionDir: string): void {
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async deleteSessionDir(sessionDir: string): Promise<void> {
     try {
       if (fs.lstatSync(sessionDir).isSymbolicLink()) {
         throw new Error("Refusing to delete through symlinked session path");
@@ -475,7 +535,75 @@ function findInPartitionTree(
   return undefined;
 }
 
-export const defaultSessionStore: SessionStore = new FilesystemSessionStore();
+// --- Active store seam ------------------------------------------------------
+//
+// Every module in this package reaches storage through `defaultSessionStore`.
+// That used to be a hard-bound FilesystemSessionStore instance, which left an
+// embedder (notably the hosted cloud) with no way to interpose a decorator —
+// so an at-rest encryption wrapper would have been unreachable dead code.
+//
+// `defaultSessionStore` is therefore a thin forwarding facade over a swappable
+// `activeStore`. Call sites are unchanged; an embedder calls setSessionStore()
+// once at boot (before any session IO) to install a decorator such as the
+// cloud's EncryptedSessionStore. Path resolvers forward too, so a backend that
+// later needs to reinterpret layout is covered by the same seam.
+
+let activeStore: SessionStore = new FilesystemSessionStore();
+
+/**
+ * Install a SessionStore for this process. Intended to be called ONCE at boot,
+ * before any session IO, by an embedder that needs to decorate storage (for
+ * example envelope encryption at rest). Not a per-request switch.
+ *
+ * Rejects `defaultSessionStore` itself. That export is a forwarding facade over
+ * `activeStore`, so installing it would make it its own delegate and every call
+ * would recurse until the stack overflows. An embedder that wants "no decorator"
+ * must simply not call this (or call resetSessionStore); a decorator must wrap a
+ * concrete store such as `new FilesystemSessionStore()`, never the facade.
+ */
+export function setSessionStore(store: SessionStore): void {
+  if (store === defaultSessionStore) {
+    throw new Error(
+      "setSessionStore: refusing to install defaultSessionStore (the forwarding facade) as the active store; wrap a concrete FilesystemSessionStore instead",
+    );
+  }
+  activeStore = store;
+}
+
+/** Restore the plain filesystem store. Primarily a test seam. */
+export function resetSessionStore(): void {
+  activeStore = new FilesystemSessionStore();
+}
+
+/** The store currently installed for this process. */
+export function getSessionStore(): SessionStore {
+  return activeStore;
+}
+
+export const defaultSessionStore: SessionStore = {
+  createSessionDir: (sessionId) => activeStore.createSessionDir(sessionId),
+  appendEvents: (sessionDir, events, opts) =>
+    activeStore.appendEvents(sessionDir, events, opts),
+  writeArtifact: (sessionDir, name, data) =>
+    activeStore.writeArtifact(sessionDir, name, data),
+  writeBlob: (sessionDir, name, data) =>
+    activeStore.writeBlob(sessionDir, name, data),
+  writeSessionArtifact: (sessionDir, name, data) =>
+    activeStore.writeSessionArtifact(sessionDir, name, data),
+  readArtifact: (sessionDir, name) =>
+    activeStore.readArtifact(sessionDir, name),
+  statArtifact: (sessionDir, name) =>
+    activeStore.statArtifact(sessionDir, name),
+  listSessions: (outputDir) => activeStore.listSessions(outputDir),
+  listArtifacts: (sessionDir) => activeStore.listArtifacts(sessionDir),
+  moveToPartition: (sessionDir, targetDir) =>
+    activeStore.moveToPartition(sessionDir, targetDir),
+  resolveSessionDir: (idOrDir, outputDir, scope) =>
+    activeStore.resolveSessionDir(idOrDir, outputDir, scope),
+  resolveScopedSessionDir: (sessionsDir, tenant, app, sessionId) =>
+    activeStore.resolveScopedSessionDir(sessionsDir, tenant, app, sessionId),
+  deleteSessionDir: (sessionDir) => activeStore.deleteSessionDir(sessionDir),
+};
 
 function existingFileBytes(filePath: string): number {
   try {

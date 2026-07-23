@@ -503,8 +503,8 @@ describe("runFastFinalize", () => {
 
   it("finalizes an un-finalized session and produces index.json", async () => {
     await withSessions(async () => {
-      sessions.create("fast_1", { app: "svc" });
-      const dir = sessions.getSessionDir("fast_1");
+      await sessions.create("fast_1", { app: "svc" });
+      const dir = await sessions.getSessionDir("fast_1");
       fs.writeFileSync(
         path.join(dir, "events.ndjson"),
         JSON.stringify({ t: Date.now(), k: "backend.uncaught", d: {} }) + "\n",
@@ -513,7 +513,7 @@ describe("runFastFinalize", () => {
       const outcome = await runFastFinalize(sessions, "fast_1");
 
       expect(outcome).toBe("finalized");
-      const finalDir = sessions.getExistingSessionDir("fast_1") as string;
+      const finalDir = await sessions.getExistingSessionDir("fast_1") as string;
       expect(fs.existsSync(path.join(finalDir, "index.json"))).toBe(true);
       const meta = JSON.parse(
         fs.readFileSync(path.join(finalDir, "meta.json"), "utf-8"),
@@ -524,9 +524,9 @@ describe("runFastFinalize", () => {
 
   it("skips a settled session and refinalizes only after late events land", async () => {
     await withSessions(async () => {
-      sessions.create("fast_2", { app: "svc" });
+      await sessions.create("fast_2", { app: "svc" });
       fs.writeFileSync(
-        path.join(sessions.getSessionDir("fast_2"), "events.ndjson"),
+        path.join(await sessions.getSessionDir("fast_2"), "events.ndjson"),
         JSON.stringify({ t: Date.now(), k: "backend.uncaught", d: {} }) + "\n",
       );
       await sessions.finalize("fast_2");
@@ -535,7 +535,7 @@ describe("runFastFinalize", () => {
       expect(await runFastFinalize(sessions, "fast_2")).toBe("skipped");
 
       // Late events land clearly after the finalize (beyond the 1s epsilon).
-      const dir = sessions.getExistingSessionDir("fast_2") as string;
+      const dir = await sessions.getExistingSessionDir("fast_2") as string;
       backdate(path.join(dir, "meta.json"), 5_000);
       fs.writeFileSync(
         path.join(dir, "events.ndjson"),

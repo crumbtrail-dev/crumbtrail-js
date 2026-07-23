@@ -52,8 +52,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function fakeStore(sessions: FakeSession[]): RecallStore {
   const byDir = new Map(sessions.map((s) => [s.id, s]));
   return {
-    listSessions: () => sessions.map((s) => ({ id: s.id, dir: s.id })),
-    readJsonRecord: (dir, name) => {
+    listSessions: async () => sessions.map((s) => ({ id: s.id, dir: s.id })),
+    readJsonRecord: async (dir, name) => {
       const session = byDir.get(dir);
       if (!session) return undefined;
       if (name === "llm.json")
@@ -62,7 +62,7 @@ function fakeStore(sessions: FakeSession[]): RecallStore {
       if (name === "meta.json") return session.meta;
       return undefined;
     },
-    readDistinctBugs: (dir) => byDir.get(dir)?.bugs ?? [],
+    readDistinctBugs: async (dir) => byDir.get(dir)?.bugs ?? [],
     isDistinctBugRecord: (x) =>
       isRecord(x) &&
       typeof x.bugId === "string" &&
@@ -113,7 +113,7 @@ describe("symptomProfile", () => {
     expect(profile.facetTokens).toEqual(tokenizeIssueText("2.1.0"));
   });
 
-  it("tolerates a bare title (no description/url/errorSig/release)", () => {
+  it("tolerates a bare title (no description/url/errorSig/release)", async () => {
     const profile = symptomProfile({ title: "boom" });
     expect(profile.tokens).toEqual(["boom"]);
     expect(profile.route).toBeUndefined();
@@ -122,12 +122,12 @@ describe("symptomProfile", () => {
   });
 });
 
-describe("locateIncident — outcome", () => {
-  it("matches a strongly-rhyming session and returns a real sessionId + reasons", () => {
+describe("locateIncident — outcome", async () => {
+  it("matches a strongly-rhyming session and returns a real sessionId + reasons", async () => {
     const store = fakeStore([
       { id: "sess-hit", bugs: [bug({ bugId: "bug-hit" })] },
     ]);
-    const result = locateIncident(strongSymptom, store, { now: 1_000 });
+    const result = await locateIncident(strongSymptom, store, { now: 1_000 });
     expect(result.outcome).toBe("matched");
     const top = result.candidates[0];
     expect(top.confidence).toBeGreaterThanOrEqual(DEFAULT_MATCH_THRESHOLD);
@@ -135,7 +135,9 @@ describe("locateIncident — outcome", () => {
       expect.arrayContaining(["semantic", "same-route", "same-error"]),
     );
     // Never fabricate a sessionId: every candidate id comes from listSessions().
-    const ids = new Set(store.listSessions().map((s) => s.id));
+    const ids = new Set(
+      (await store.listSessions()).map((s) => s.id),
+    );
     for (const candidate of result.candidates) {
       expect(ids.has(candidate.sessionId)).toBe(true);
     }
@@ -143,7 +145,7 @@ describe("locateIncident — outcome", () => {
     expect(top.bugId).toBe("bug-hit");
   });
 
-  it("is inconclusive and never promotes a below-threshold near-miss", () => {
+  it("is inconclusive and never promotes a below-threshold near-miss", async () => {
     // Weak text-only overlap, no route/error anchor → base < threshold.
     const store = fakeStore([
       {
@@ -161,7 +163,7 @@ describe("locateIncident — outcome", () => {
         ],
       },
     ]);
-    const result = locateIncident({ title: "payment gateway" }, store, {
+    const result = await locateIncident({ title: "payment gateway" }, store, {
       now: 1_000,
     });
     expect(result.outcome).toBe("inconclusive");
@@ -172,7 +174,7 @@ describe("locateIncident — outcome", () => {
     );
   });
 
-  it("returns no candidates when nothing has any base signal", () => {
+  it("returns no candidates when nothing has any base signal", async () => {
     const store = fakeStore([
       {
         id: "sess-unrelated",
@@ -189,7 +191,7 @@ describe("locateIncident — outcome", () => {
         ],
       },
     ]);
-    const result = locateIncident({ title: "login redirect loop" }, store, {
+    const result = await locateIncident({ title: "login redirect loop" }, store, {
       now: 1_000,
     });
     expect(result.outcome).toBe("inconclusive");
@@ -202,7 +204,7 @@ describe("locateIncident — outcome", () => {
       { id: "session-two", bugs: [bug({ bugId: "bug-two" })] },
     ]);
 
-    const result = locateIncident(strongSymptom, store, { now: 1_000 });
+    const result = await locateIncident(strongSymptom, store, { now: 1_000 });
     expect(result.outcome).toBe("ambiguous");
     expect(result.candidates[0].confidence).toBeGreaterThanOrEqual(
       DEFAULT_MATCH_THRESHOLD,
@@ -211,7 +213,7 @@ describe("locateIncident — outcome", () => {
       result.candidates[0].confidence - result.candidates[1].confidence,
     ).toBeLessThan(DEFAULT_MATCH_MARGIN);
 
-    const located = locateEvidence(strongSymptom, store, { now: 1_000 });
+    const located = await locateEvidence(strongSymptom, store, { now: 1_000 });
     expect(located.evidence).toEqual([]);
     expect(located.match.outcome).toBe("ambiguous");
     expect("sessionId" in located.match).toBe(false);
@@ -244,7 +246,7 @@ describe("locateIncident — outcome", () => {
     );
   });
 
-  it("matches when the top candidate clears the decision margin", () => {
+  it("matches when the top candidate clears the decision margin", async () => {
     const store = fakeStore([
       { id: "session-strong", bugs: [bug({ bugId: "bug-strong" })] },
       {
@@ -263,7 +265,7 @@ describe("locateIncident — outcome", () => {
       },
     ]);
 
-    const result = locateIncident(strongSymptom, store, { now: 1_000 });
+    const result = await locateIncident(strongSymptom, store, { now: 1_000 });
     expect(result.outcome).toBe("matched");
     expect(result.candidates[0].sessionId).toBe("session-strong");
     expect(
@@ -275,7 +277,7 @@ describe("locateIncident — outcome", () => {
     const matchedStore = fakeStore([
       { id: "session-matched", bugs: [bug({ bugId: "bug-matched" })] },
     ]);
-    const matchedRanked = locateIncident(strongSymptom, matchedStore, {
+    const matchedRanked = await locateIncident(strongSymptom, matchedStore, {
       now: 1_000,
     });
     const expectedMatchedMatch = {
@@ -285,7 +287,7 @@ describe("locateIncident — outcome", () => {
       reasons: matchedRanked.candidates[0].reasons,
     };
     expect(
-      locateEvidence(strongSymptom, matchedStore, { now: 1_000 }).match,
+      (await locateEvidence(strongSymptom, matchedStore, { now: 1_000 })).match,
     ).toStrictEqual(expectedMatchedMatch);
     const matchedAssembled = await locateAndAssemble(
       strongSymptom,
@@ -315,7 +317,7 @@ describe("locateIncident — outcome", () => {
         ],
       },
     ]);
-    const inconclusiveRanked = locateIncident(
+    const inconclusiveRanked = await locateIncident(
       inconclusiveSymptom,
       inconclusiveStore,
       { now: 1_000 },
@@ -326,9 +328,11 @@ describe("locateIncident — outcome", () => {
       reasons: inconclusiveRanked.candidates[0].reasons,
     };
     expect(
-      locateEvidence(inconclusiveSymptom, inconclusiveStore, {
-        now: 1_000,
-      }).match,
+      (
+        await locateEvidence(inconclusiveSymptom, inconclusiveStore, {
+          now: 1_000,
+        })
+      ).match,
     ).toStrictEqual(expectedInconclusiveMatch);
     const inconclusiveAssembled = await locateAndAssemble(
       inconclusiveSymptom,
@@ -345,8 +349,8 @@ describe("locateIncident — outcome", () => {
   });
 });
 
-describe("locateIncident — deterministic ranking", () => {
-  it("breaks equal-confidence ties by recency before bugId, independent of store order", () => {
+describe("locateIncident — deterministic ranking", async () => {
+  it("breaks equal-confidence ties by recency before bugId, independent of store order", async () => {
     const now = 1_000;
     // Both sessions get the same capped time boost. The more-recent one has a
     // later index timestamp but a bugId that would lose an alphabetical tie.
@@ -362,7 +366,7 @@ describe("locateIncident — deterministic ranking", () => {
         index: { end: now + 1 },
       },
     ]);
-    const result = locateIncident(strongSymptom, store, { now });
+    const result = await locateIncident(strongSymptom, store, { now });
     expect(result.candidates.map((c) => c.sessionId)).toEqual([
       "sess-newer",
       "sess-older",
@@ -373,31 +377,33 @@ describe("locateIncident — deterministic ranking", () => {
     );
   });
 
-  it("documents the >= threshold boundary (inclusive)", () => {
+  it("documents the >= threshold boundary (inclusive)", async () => {
     const store = fakeStore([{ id: "s1", bugs: [bug({ bugId: "bug-1" })] }]);
     // Read the exact top confidence (no timestamp → stable across calls).
-    const probe = locateIncident(strongSymptom, store, {
+    const probe = await locateIncident(strongSymptom, store, {
       now: 1_000,
       threshold: 0,
     });
     const s = probe.candidates[0].confidence;
     // Exactly at the bar → matched (>=).
     expect(
-      locateIncident(strongSymptom, store, { now: 1_000, threshold: s })
+      (await locateIncident(strongSymptom, store, { now: 1_000, threshold: s }))
         .outcome,
     ).toBe("matched");
     // Strictly above the top score → inconclusive.
     expect(
-      locateIncident(strongSymptom, store, {
-        now: 1_000,
-        threshold: s + 1e-9,
-      }).outcome,
+      (
+        await locateIncident(strongSymptom, store, {
+          now: 1_000,
+          threshold: s + 1e-9,
+        })
+      ).outcome,
     ).toBe("inconclusive");
   });
 });
 
-describe("locateIncident — account narrowing", () => {
-  it("drops a higher scoring known foreign account before ranking while retaining unknown accounts", () => {
+describe("locateIncident — account narrowing", async () => {
+  it("drops a higher scoring known foreign account before ranking while retaining unknown accounts", async () => {
     const store = fakeStore([
       {
         id: "session-foreign",
@@ -435,7 +441,7 @@ describe("locateIncident — account narrowing", () => {
       },
     ]);
 
-    const unfiltered = locateIncident(strongSymptom, store, { now: 1_000 });
+    const unfiltered = await locateIncident(strongSymptom, store, { now: 1_000 });
     const targetWithoutNarrowing = unfiltered.candidates.find(
       (candidate) => candidate.sessionId === "session-target",
     );
@@ -444,7 +450,7 @@ describe("locateIncident — account narrowing", () => {
       targetWithoutNarrowing!.confidence,
     );
 
-    const result = locateIncident(strongSymptom, store, {
+    const result = await locateIncident(strongSymptom, store, {
       now: 1_000,
       accountId: "account-target",
     });
@@ -458,18 +464,18 @@ describe("locateIncident — account narrowing", () => {
   });
 });
 
-describe("locateIncident — calibration logging", () => {
-  it("logs the numeric top score and achieved margin for matched and ambiguous results", () => {
+describe("locateIncident — calibration logging", async () => {
+  it("logs the numeric top score and achieved margin for matched and ambiguous results", async () => {
     const stderr = vi
       .spyOn(process.stderr, "write")
       .mockImplementation(() => true);
     try {
-      const matched = locateIncident(
+      const matched = await locateIncident(
         strongSymptom,
         fakeStore([{ id: "session-only", bugs: [bug({ bugId: "bug-only" })] }]),
         { now: 1_000 },
       );
-      const ambiguous = locateIncident(
+      const ambiguous = await locateIncident(
         strongSymptom,
         fakeStore([
           { id: "session-one", bugs: [bug({ bugId: "bug-one" })] },
@@ -500,7 +506,7 @@ describe("locateIncident — calibration logging", () => {
 });
 
 describe("locateIncident — bounded refinement signals", () => {
-  it("prefers the more recent session and labels it time-proximity", () => {
+  it("prefers the more recent session and labels it time-proximity", async () => {
     const now = 1_000_000_000_000;
     const day = 24 * 60 * 60 * 1000;
     const store = fakeStore([
@@ -515,7 +521,7 @@ describe("locateIncident — bounded refinement signals", () => {
         index: { end: now },
       },
     ]);
-    const result = locateIncident(strongSymptom, store, { now });
+    const result = await locateIncident(strongSymptom, store, { now });
     expect(result.candidates[0].sessionId).toBe("sess-recent");
     expect(result.candidates[0].reasons).toContain("time-proximity");
     expect(result.candidates[1].reasons).not.toContain("time-proximity");
@@ -524,7 +530,7 @@ describe("locateIncident — bounded refinement signals", () => {
     );
   });
 
-  it("prefers the session on the ticket's release and labels it release-hint", () => {
+  it("prefers the session on the ticket's release and labels it release-hint", async () => {
     const store = fakeStore([
       {
         id: "sess-other-release",
@@ -537,7 +543,7 @@ describe("locateIncident — bounded refinement signals", () => {
         meta: { release: "1.2.3" },
       },
     ]);
-    const result = locateIncident(
+    const result = await locateIncident(
       { ...strongSymptom, release: "1.2.3" },
       store,
       { now: 1_000 },
@@ -547,7 +553,7 @@ describe("locateIncident — bounded refinement signals", () => {
     expect(result.candidates[1].reasons).not.toContain("release-hint");
   });
 
-  it("reads release from releaseId / version too", () => {
+  it("reads release from releaseId / version too", async () => {
     const store = fakeStore([
       {
         id: "sess-versioned",
@@ -555,7 +561,7 @@ describe("locateIncident — bounded refinement signals", () => {
         meta: { version: "4.5.6" },
       },
     ]);
-    const result = locateIncident(
+    const result = await locateIncident(
       { ...strongSymptom, release: "4.5.6" },
       store,
       { now: 1_000 },
@@ -565,7 +571,7 @@ describe("locateIncident — bounded refinement signals", () => {
 });
 
 describe("locateIncident — logging", () => {
-  it("writes one structured JSON line to stderr (not stdout)", () => {
+  it("writes one structured JSON line to stderr (not stdout)", async () => {
     const store = fakeStore([{ id: "s1", bugs: [bug({ bugId: "b1" })] }]);
     const stderrSpy = vi
       .spyOn(process.stderr, "write")
@@ -574,7 +580,7 @@ describe("locateIncident — logging", () => {
       .spyOn(process.stdout, "write")
       .mockImplementation(() => true);
     try {
-      const result = locateIncident(strongSymptom, store, { now: 1_000 });
+      const result = await locateIncident(strongSymptom, store, { now: 1_000 });
       expect(stderrSpy).toHaveBeenCalledTimes(1);
       expect(stdoutSpy).not.toHaveBeenCalled();
       const line = String(stderrSpy.mock.calls[0][0]);

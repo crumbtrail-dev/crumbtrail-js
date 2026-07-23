@@ -8,20 +8,20 @@ function readFileExists(sessionDir: string, name: string): boolean {
   return fs.existsSync(path.join(sessionDir, name));
 }
 
-describe("SessionManager", () => {
+describe("SessionManager", async () => {
   let tmpDir: string;
   let sessions: SessionManager;
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "buglogger-session-"));
     sessions = new SessionManager(tmpDir);
   });
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("creates session directory with meta.json and frames/", () => {
-    sessions.create("ses_test", { app: "myapp" });
-    const sessionDir = sessions.getSessionDir("ses_test");
+  it("creates session directory with meta.json and frames/", async () => {
+    await sessions.create("ses_test", { app: "myapp" });
+    const sessionDir = await sessions.getSessionDir("ses_test");
     expect(fs.existsSync(sessionDir)).toBe(true);
     expect(fs.existsSync(path.join(sessionDir, "frames"))).toBe(true);
     const meta = JSON.parse(
@@ -32,31 +32,31 @@ describe("SessionManager", () => {
     expect(meta.start).toBeTypeOf("number");
   });
 
-  it("creates session directories with owner-only permissions on Unix", () => {
+  it("creates session directories with owner-only permissions on Unix", async () => {
     if (process.platform === "win32") return;
 
-    sessions.create("ses_private", { app: "myapp" });
-    const sessionDir = sessions.getSessionDir("ses_private");
+    await sessions.create("ses_private", { app: "myapp" });
+    const sessionDir = await sessions.getSessionDir("ses_private");
     const framesDir = path.join(sessionDir, "frames");
 
     expect(fs.statSync(sessionDir).mode & 0o777).toBe(0o700);
     expect(fs.statSync(framesDir).mode & 0o777).toBe(0o700);
   });
 
-  it("repairs existing session directory permissions on Unix when accessed", () => {
+  it("repairs existing session directory permissions on Unix when accessed", async () => {
     if (process.platform === "win32") return;
 
-    sessions.create("ses_repair_mode", { app: "myapp" });
-    const sessionDir = sessions.getSessionDir("ses_repair_mode");
+    await sessions.create("ses_repair_mode", { app: "myapp" });
+    const sessionDir = await sessions.getSessionDir("ses_repair_mode");
     fs.chmodSync(sessionDir, 0o755);
 
-    expect(sessions.getExistingSessionDir("ses_repair_mode")).toBe(sessionDir);
+    expect(await sessions.getExistingSessionDir("ses_repair_mode")).toBe(sessionDir);
     expect(fs.statSync(sessionDir).mode & 0o777).toBe(0o700);
   });
 
   it("preserves the original start on a repeat create (reload re-start)", async () => {
-    sessions.create("ses_reload", { app: "myapp" });
-    const sessionDir = sessions.getSessionDir("ses_reload");
+    await sessions.create("ses_reload", { app: "myapp" });
+    const sessionDir = await sessions.getSessionDir("ses_reload");
     const firstMeta = JSON.parse(
       fs.readFileSync(path.join(sessionDir, "meta.json"), "utf-8"),
     );
@@ -68,7 +68,7 @@ describe("SessionManager", () => {
       JSON.stringify({ t: originalStart + 1, k: "clk", d: {} }) + "\n",
     );
     await new Promise((r) => setTimeout(r, 5));
-    sessions.create("ses_reload", { app: "myapp" });
+    await sessions.create("ses_reload", { app: "myapp" });
 
     const secondMeta = JSON.parse(
       fs.readFileSync(path.join(sessionDir, "meta.json"), "utf-8"),
@@ -78,14 +78,14 @@ describe("SessionManager", () => {
     expect(fs.existsSync(path.join(sessionDir, "events.ndjson"))).toBe(true);
   });
 
-  it("keeps canonical session metadata authoritative over caller metadata", () => {
-    sessions.create("ses_canonical", {
+  it("keeps canonical session metadata authoritative over caller metadata", async () => {
+    await sessions.create("ses_canonical", {
       id: "spoofed",
       start: 1,
       end: 2,
       app: "myapp",
     });
-    const sessionDir = sessions.getSessionDir("ses_canonical");
+    const sessionDir = await sessions.getSessionDir("ses_canonical");
     const meta = JSON.parse(
       fs.readFileSync(path.join(sessionDir, "meta.json"), "utf-8"),
     );
@@ -98,40 +98,40 @@ describe("SessionManager", () => {
     expect(meta.app).toBe("myapp");
   });
 
-  it("rejects creating over an existing session id", () => {
-    sessions.create("ses_unique", { app: "first" });
+  it("rejects creating over an existing session id", async () => {
+    await sessions.create("ses_unique", { app: "first" });
 
-    expect(() => sessions.create("ses_unique", { app: "second" })).toThrow(
+    await expect(sessions.create("ses_unique", { app: "second" })).rejects.toThrow(
       "Session already exists",
     );
     const meta = JSON.parse(
       fs.readFileSync(
-        path.join(sessions.getSessionDir("ses_unique"), "meta.json"),
+        path.join(await sessions.getSessionDir("ses_unique"), "meta.json"),
         "utf-8",
       ),
     );
     expect(meta.app).toBe("first");
   });
 
-  it("getSessionDir returns correct path", () => {
-    expect(sessions.getSessionDir("ses_abc")).toBe(
+  it("getSessionDir returns correct path", async () => {
+    expect(await sessions.getSessionDir("ses_abc")).toBe(
       path.join(tmpDir, ".sessions", "ses_abc"),
     );
   });
 
-  it("rejects session ids that resolve to the output root", () => {
-    expect(() => sessions.create(".", {})).toThrow("Invalid sessionId");
-    expect(() => sessions.getSessionDir("..")).toThrow("Invalid sessionId");
+  it("rejects session ids that resolve to the output root", async () => {
+    await expect(sessions.create(".", {})).rejects.toThrow("Invalid sessionId");
+    await expect(sessions.getSessionDir("..")).rejects.toThrow("Invalid sessionId");
     expect(fs.existsSync(path.join(tmpDir, "meta.json"))).toBe(false);
   });
 
   it("finalize preserves mixed page evidence artifacts without leaking raw sensitive values", async () => {
     const secret = "sk_fake_abcdefghijklmnopqrstuvwxyz";
-    sessions.create("ses_mixed_page", {
+    await sessions.create("ses_mixed_page", {
       source: "buglogger-extension",
       pageProbe: true,
     });
-    const sessionDir = sessions.getSessionDir("ses_mixed_page");
+    const sessionDir = await sessions.getSessionDir("ses_mixed_page");
     const events = [
       {
         t: 1000,
@@ -283,7 +283,7 @@ describe("SessionManager", () => {
     );
 
     const finalization = await sessions.finalize("ses_mixed_page");
-    const finalizedDir = sessions.getSessionDir("ses_mixed_page");
+    const finalizedDir = await sessions.getSessionDir("ses_mixed_page");
 
     expect(finalization).toMatchObject({
       ok: true,
@@ -330,8 +330,8 @@ describe("SessionManager", () => {
   });
 
   it("finalize generates index.json and updates meta.json", async () => {
-    sessions.create("ses_test", {});
-    const sessionDir = sessions.getSessionDir("ses_test");
+    await sessions.create("ses_test", {});
+    const sessionDir = await sessions.getSessionDir("ses_test");
     const events = [
       { t: 1000, k: "nav", d: { to: "/", from: "", tr: "init" } },
       { t: 1100, k: "err", d: { msg: "oops" } },
@@ -341,7 +341,7 @@ describe("SessionManager", () => {
       events.map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
     const finalization = await sessions.finalize("ses_test");
-    const finalizedDir = sessions.getSessionDir("ses_test");
+    const finalizedDir = await sessions.getSessionDir("ses_test");
     expect(finalization).toMatchObject({
       ok: true,
       sessionId: "ses_test",
@@ -362,11 +362,11 @@ describe("SessionManager", () => {
   });
 
   it("moves finalized sessions into the v2 tenant/app/date partition path while preserving id lookup", async () => {
-    sessions.create("ses_partitioned", {
+    await sessions.create("ses_partitioned", {
       tenant: "Acme Corp",
       app: "Checkout App",
     });
-    const liveDir = sessions.getSessionDir("ses_partitioned");
+    const liveDir = await sessions.getSessionDir("ses_partitioned");
     const sessionStart = Date.parse("2026-06-30T12:00:00.000Z");
     const meta = JSON.parse(
       fs.readFileSync(path.join(liveDir, "meta.json"), "utf-8"),
@@ -383,7 +383,7 @@ describe("SessionManager", () => {
 
     await sessions.finalize("ses_partitioned");
 
-    const finalizedDir = sessions.getSessionDir("ses_partitioned");
+    const finalizedDir = await sessions.getSessionDir("ses_partitioned");
     expect(finalizedDir).toBe(
       path.join(
         tmpDir,
@@ -394,10 +394,10 @@ describe("SessionManager", () => {
       ),
     );
     expect(fs.existsSync(liveDir)).toBe(false);
-    expect(sessions.getExistingSessionDir("ses_partitioned")).toBe(
+    expect(await sessions.getExistingSessionDir("ses_partitioned")).toBe(
       finalizedDir,
     );
-    expect(sessions.list().map((s) => s.id)).toContain("ses_partitioned");
+    expect((await sessions.list()).map((s) => s.id)).toContain("ses_partitioned");
     const manifest = JSON.parse(
       fs.readFileSync(path.join(finalizedDir, "manifest.json"), "utf-8"),
     );
@@ -417,29 +417,27 @@ describe("SessionManager", () => {
   });
 
   it("rejects creating over an existing partitioned session id", async () => {
-    sessions.create("ses_partition_conflict", {
+    await sessions.create("ses_partition_conflict", {
       tenant: "Acme",
       app: "Checkout",
     });
-    const liveDir = sessions.getSessionDir("ses_partition_conflict");
+    const liveDir = await sessions.getSessionDir("ses_partition_conflict");
     fs.writeFileSync(
       path.join(liveDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hello" } })}\n`,
     );
     await sessions.finalize("ses_partition_conflict");
 
-    expect(() =>
-      sessions.create("ses_partition_conflict", { app: "new" }),
-    ).toThrow("Session already exists");
-    expect(sessions.getExistingSessionDir("ses_partition_conflict")).toContain(
+    await expect(sessions.create("ses_partition_conflict", { app: "new" })).rejects.toThrow("Session already exists");
+    expect(await sessions.getExistingSessionDir("ses_partition_conflict")).toContain(
       path.join("acme", "checkout"),
     );
   });
 
   it("finalizes under the default partition even when another live session is named local", async () => {
-    sessions.create("local", { app: "flat" });
-    sessions.create("ses_under_local", {});
-    const sessionDir = sessions.getSessionDir("ses_under_local");
+    await sessions.create("local", { app: "flat" });
+    await sessions.create("ses_under_local", {});
+    const sessionDir = await sessions.getSessionDir("ses_under_local");
     fs.writeFileSync(
       path.join(sessionDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hello" } })}\n`,
@@ -447,20 +445,20 @@ describe("SessionManager", () => {
 
     await sessions.finalize("ses_under_local");
 
-    expect(sessions.getExistingSessionDir("ses_under_local")).toContain(
+    expect(await sessions.getExistingSessionDir("ses_under_local")).toContain(
       path.join("local", "unknown-app"),
     );
-    expect(sessions.getExistingSessionDir("ses_under_local")).toContain(
+    expect(await sessions.getExistingSessionDir("ses_under_local")).toContain(
       "ses_under_local",
     );
-    expect(sessions.getExistingSessionDir("local")).toBe(
+    expect(await sessions.getExistingSessionDir("local")).toBe(
       path.join(tmpDir, ".sessions", "local"),
     );
   });
 
   it("finalizes a session named local without moving it into its own descendant", async () => {
-    sessions.create("local", {});
-    const sessionDir = sessions.getSessionDir("local");
+    await sessions.create("local", {});
+    const sessionDir = await sessions.getSessionDir("local");
     fs.writeFileSync(
       path.join(sessionDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hello" } })}\n`,
@@ -468,15 +466,15 @@ describe("SessionManager", () => {
 
     await sessions.finalize("local");
 
-    expect(sessions.getExistingSessionDir("local")).not.toBe(sessionDir);
-    expect(sessions.getExistingSessionDir("local")).toContain(
+    expect(await sessions.getExistingSessionDir("local")).not.toBe(sessionDir);
+    expect(await sessions.getExistingSessionDir("local")).toContain(
       path.join("local", "unknown-app"),
     );
   });
 
   it("falls back for dot-like partition segments", async () => {
-    sessions.create("ses_dot_partition", { tenant: ".", app: ".." });
-    const sessionDir = sessions.getSessionDir("ses_dot_partition");
+    await sessions.create("ses_dot_partition", { tenant: ".", app: ".." });
+    const sessionDir = await sessions.getSessionDir("ses_dot_partition");
     fs.writeFileSync(
       path.join(sessionDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hello" } })}\n`,
@@ -484,14 +482,14 @@ describe("SessionManager", () => {
 
     await sessions.finalize("ses_dot_partition");
 
-    const finalizedDir = sessions.getSessionDir("ses_dot_partition");
+    const finalizedDir = await sessions.getSessionDir("ses_dot_partition");
     expect(finalizedDir).toContain(path.join("local", "unknown-app"));
     expect(finalizedDir).not.toContain(`${path.sep}.${path.sep}`);
   });
 
   it("rejects finalization when generated artifacts are symlinked", async () => {
-    sessions.create("ses_symlink_artifact", {});
-    const sessionDir = sessions.getSessionDir("ses_symlink_artifact");
+    await sessions.create("ses_symlink_artifact", {});
+    const sessionDir = await sessions.getSessionDir("ses_symlink_artifact");
     const outsideFile = path.join(
       os.tmpdir(),
       `buglogger-session-outside-${Date.now()}.json`,
@@ -510,8 +508,8 @@ describe("SessionManager", () => {
   });
 
   it("rejects finalization when candidate or window artifacts are symlinked", async () => {
-    sessions.create("ses_symlink_candidate_artifact", {});
-    const sessionDir = sessions.getSessionDir("ses_symlink_candidate_artifact");
+    await sessions.create("ses_symlink_candidate_artifact", {});
+    const sessionDir = await sessions.getSessionDir("ses_symlink_candidate_artifact");
     const outsideFile = path.join(
       os.tmpdir(),
       `buglogger-session-candidate-${Date.now()}.md`,
@@ -530,8 +528,8 @@ describe("SessionManager", () => {
   });
 
   it("rejects finalization when existing window artifacts are symlinked", async () => {
-    sessions.create("ses_symlink_window_artifact", {});
-    const sessionDir = sessions.getSessionDir("ses_symlink_window_artifact");
+    await sessions.create("ses_symlink_window_artifact", {});
+    const sessionDir = await sessions.getSessionDir("ses_symlink_window_artifact");
     const windowsDir = path.join(sessionDir, "windows");
     const outsideFile = path.join(
       os.tmpdir(),
@@ -552,8 +550,8 @@ describe("SessionManager", () => {
   });
 
   it("finalize writes processed: true after successful post-processing", async () => {
-    sessions.create("ses_processed", {});
-    const sessionDir = sessions.getSessionDir("ses_processed");
+    await sessions.create("ses_processed", {});
+    const sessionDir = await sessions.getSessionDir("ses_processed");
     const events = [
       { t: 1000, k: "nav", d: { to: "/", from: "", tr: "init" } },
     ];
@@ -562,7 +560,7 @@ describe("SessionManager", () => {
       events.map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
     const finalization = await sessions.finalize("ses_processed");
-    const finalizedDir = sessions.getSessionDir("ses_processed");
+    const finalizedDir = await sessions.getSessionDir("ses_processed");
     const meta = JSON.parse(
       fs.readFileSync(path.join(finalizedDir, "meta.json"), "utf-8"),
     );
@@ -578,8 +576,8 @@ describe("SessionManager", () => {
   });
 
   it("finalize marks video degraded when media.video errors exist without recording.webm", async () => {
-    sessions.create("ses_video_degraded", {});
-    const sessionDir = sessions.getSessionDir("ses_video_degraded");
+    await sessions.create("ses_video_degraded", {});
+    const sessionDir = await sessions.getSessionDir("ses_video_degraded");
     const events = [
       { t: 1000, k: "session.lifecycle", d: { action: "start" } },
       {
@@ -598,7 +596,7 @@ describe("SessionManager", () => {
     );
 
     const finalization = await sessions.finalize("ses_video_degraded");
-    const finalizedDir = sessions.getSessionDir("ses_video_degraded");
+    const finalizedDir = await sessions.getSessionDir("ses_video_degraded");
     const meta = JSON.parse(
       fs.readFileSync(path.join(finalizedDir, "meta.json"), "utf-8"),
     );
@@ -638,10 +636,10 @@ describe("SessionManager", () => {
         throw new Error("index write failed");
       },
     });
-    degradedSessions.create("ses_degraded", {});
+    await degradedSessions.create("ses_degraded", {});
 
     const finalization = await degradedSessions.finalize("ses_degraded");
-    const degradedDir = degradedSessions.getSessionDir("ses_degraded");
+    const degradedDir = await degradedSessions.getSessionDir("ses_degraded");
     const meta = JSON.parse(
       fs.readFileSync(path.join(degradedDir, "meta.json"), "utf-8"),
     );
@@ -680,11 +678,11 @@ describe("SessionManager", () => {
         observedEndDuringPostProcess.push(meta.end);
       },
     });
-    interceptedSessions.create("ses_end_order", {});
+    await interceptedSessions.create("ses_end_order", {});
     await interceptedSessions.finalize("ses_end_order");
 
     expect(observedEndDuringPostProcess).toEqual([undefined]);
-    const finalizedDir = interceptedSessions.getSessionDir("ses_end_order");
+    const finalizedDir = await interceptedSessions.getSessionDir("ses_end_order");
     const meta = JSON.parse(
       fs.readFileSync(path.join(finalizedDir, "meta.json"), "utf-8"),
     );
@@ -693,8 +691,8 @@ describe("SessionManager", () => {
   });
 
   it("treats a session directory without meta.json as not found", async () => {
-    sessions.create("ses_missing_meta", {});
-    const sessionDir = sessions.getSessionDir("ses_missing_meta");
+    await sessions.create("ses_missing_meta", {});
+    const sessionDir = await sessions.getSessionDir("ses_missing_meta");
     fs.rmSync(path.join(sessionDir, "meta.json"));
 
     await expect(sessions.finalize("ses_missing_meta")).rejects.toThrow(
@@ -703,8 +701,8 @@ describe("SessionManager", () => {
   });
 
   it("finalize throws a structured error when meta.json is corrupt JSON", async () => {
-    sessions.create("ses_corrupt_meta", {});
-    const sessionDir = sessions.getSessionDir("ses_corrupt_meta");
+    await sessions.create("ses_corrupt_meta", {});
+    const sessionDir = await sessions.getSessionDir("ses_corrupt_meta");
     fs.writeFileSync(path.join(sessionDir, "meta.json"), "{ not valid json");
 
     await expect(sessions.finalize("ses_corrupt_meta")).rejects.toThrow(
@@ -712,38 +710,38 @@ describe("SessionManager", () => {
     );
   });
 
-  it("list returns all sessions", () => {
-    sessions.create("ses_1", { app: "a" });
-    sessions.create("ses_2", { app: "b" });
-    const list = sessions.list();
+  it("list returns all sessions", async () => {
+    await sessions.create("ses_1", { app: "a" });
+    await sessions.create("ses_2", { app: "b" });
+    const list = await sessions.list();
     expect(list).toHaveLength(2);
     expect(list.map((s) => s.id).sort()).toEqual(["ses_1", "ses_2"]);
   });
 
-  it("list filters by time range", () => {
-    sessions.create("ses_1", {});
-    sessions.create("ses_2", {});
-    const meta1Path = path.join(sessions.getSessionDir("ses_1"), "meta.json");
+  it("list filters by time range", async () => {
+    await sessions.create("ses_1", {});
+    await sessions.create("ses_2", {});
+    const meta1Path = path.join(await sessions.getSessionDir("ses_1"), "meta.json");
     const meta1 = JSON.parse(fs.readFileSync(meta1Path, "utf-8"));
     meta1.start = 1000;
     fs.writeFileSync(meta1Path, JSON.stringify(meta1));
-    const meta2Path = path.join(sessions.getSessionDir("ses_2"), "meta.json");
+    const meta2Path = path.join(await sessions.getSessionDir("ses_2"), "meta.json");
     const meta2 = JSON.parse(fs.readFileSync(meta2Path, "utf-8"));
     meta2.start = 2000;
     fs.writeFileSync(meta2Path, JSON.stringify(meta2));
-    const result = sessions.list({ after: 1500 });
+    const result = await sessions.list({ after: 1500 });
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe("ses_2");
   });
 
-  it("list returns empty array when no sessions exist", () => {
+  it("list returns empty array when no sessions exist", async () => {
     const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "buglogger-empty-"));
     const emptySessions = new SessionManager(emptyDir);
-    expect(emptySessions.list()).toEqual([]);
+    expect(await emptySessions.list()).toEqual([]);
     fs.rmSync(emptyDir, { recursive: true, force: true });
   });
 
-  it("list ignores symlinked directories pointing outside outputDir", () => {
+  it("list ignores symlinked directories pointing outside outputDir", async () => {
     // Create a sibling directory outside outputDir containing a meta.json. If list()
     // followed symlinks naively, this directory would appear in the result and let a
     // caller smuggle arbitrary filesystem content through the sessions API.
@@ -758,9 +756,9 @@ describe("SessionManager", () => {
       // Symlink outsideDir into outputDir under a session-like name.
       fs.symlinkSync(outsideDir, path.join(tmpDir, "ses_symlinked"), "dir");
       // Also create a genuine session so we know list() still works.
-      sessions.create("ses_real", { app: "real" });
+      await sessions.create("ses_real", { app: "real" });
 
-      const result = sessions.list();
+      const result = await sessions.list();
       const ids = result.map((s) => s.id).sort();
       expect(ids).toEqual(["ses_real"]);
       expect(ids).not.toContain("ses_outside");
@@ -769,16 +767,16 @@ describe("SessionManager", () => {
     }
   });
 
-  it("rejects direct access to symlinked session directories", () => {
+  it("rejects direct access to symlinked session directories", async () => {
     const outsideDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "buglogger-outside-direct-"),
     );
     try {
       fs.symlinkSync(outsideDir, path.join(tmpDir, "ses_direct_link"), "dir");
-      expect(() => sessions.getExistingSessionDir("ses_direct_link")).toThrow(
+      await expect(sessions.getExistingSessionDir("ses_direct_link")).rejects.toThrow(
         "Invalid sessionId",
       );
-      expect(() => sessions.create("ses_direct_link", {})).toThrow(
+      await expect(sessions.create("ses_direct_link", {})).rejects.toThrow(
         "Invalid sessionId",
       );
     } finally {
@@ -799,17 +797,17 @@ describe("SessionManager", () => {
         );
       },
     });
-    idempotentSessions.create("ses_idem", { app: "myapp" });
-    const sessionDir = idempotentSessions.getSessionDir("ses_idem");
+    await idempotentSessions.create("ses_idem", { app: "myapp" });
+    const sessionDir = await idempotentSessions.getSessionDir("ses_idem");
     fs.writeFileSync(
       path.join(sessionDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hi" } })}\n`,
     );
 
     const first = await idempotentSessions.finalize("ses_idem");
-    const firstDir = idempotentSessions.getSessionDir("ses_idem");
+    const firstDir = await idempotentSessions.getSessionDir("ses_idem");
     const second = await idempotentSessions.finalize("ses_idem");
-    const secondDir = idempotentSessions.getSessionDir("ses_idem");
+    const secondDir = await idempotentSessions.getSessionDir("ses_idem");
 
     // postProcess runs exactly once across both finalize calls.
     expect(calls).toBe(1);
@@ -831,15 +829,15 @@ describe("SessionManager", () => {
         throw new Error("compression interrupted");
       },
     });
-    throwingSessions.create("ses_durability", {});
-    const sessionDir = throwingSessions.getSessionDir("ses_durability");
+    await throwingSessions.create("ses_durability", {});
+    const sessionDir = await throwingSessions.getSessionDir("ses_durability");
     fs.writeFileSync(
       path.join(sessionDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hi" } })}\n`,
     );
 
     const finalization = await throwingSessions.finalize("ses_durability");
-    const finalizedDir = throwingSessions.getSessionDir("ses_durability");
+    const finalizedDir = await throwingSessions.getSessionDir("ses_durability");
 
     expect(finalization).toMatchObject({ processed: false, degraded: true });
     // Raw evidence survives so the cold-storage hiding gate does not strand it.
@@ -871,8 +869,8 @@ describe("SessionManager", () => {
         // Succeeds on retry.
       },
     });
-    retrySessions.create("ses_retry", {});
-    const sessionDir = retrySessions.getSessionDir("ses_retry");
+    await retrySessions.create("ses_retry", {});
+    const sessionDir = await retrySessions.getSessionDir("ses_retry");
     fs.writeFileSync(
       path.join(sessionDir, "events.ndjson"),
       `${JSON.stringify({ t: 1, k: "con", d: { msg: "hi" } })}\n`,
@@ -886,7 +884,7 @@ describe("SessionManager", () => {
     expect(attempt).toBe(2);
     expect(second.processed).toBe(true);
 
-    const finalizedDir = retrySessions.getSessionDir("ses_retry");
+    const finalizedDir = await retrySessions.getSessionDir("ses_retry");
     const meta = JSON.parse(
       fs.readFileSync(path.join(finalizedDir, "meta.json"), "utf-8"),
     );
@@ -894,8 +892,8 @@ describe("SessionManager", () => {
   });
 
   it("truncates and strips non-printable chars from page-influenced video warning messages", async () => {
-    sessions.create("ses_video_malicious", {});
-    const sessionDir = sessions.getSessionDir("ses_video_malicious");
+    await sessions.create("ses_video_malicious", {});
+    const sessionDir = await sessions.getSessionDir("ses_video_malicious");
     // Construct a page-controlled message that mixes ANSI escapes, null bytes,
     // non-ASCII, and is well over the 200-char ceiling.
     const malicious =
@@ -914,7 +912,7 @@ describe("SessionManager", () => {
     );
 
     const finalization = await sessions.finalize("ses_video_malicious");
-    const finalizedDir = sessions.getSessionDir("ses_video_malicious");
+    const finalizedDir = await sessions.getSessionDir("ses_video_malicious");
     const warning = finalization.postProcess.warnings?.[0];
     expect(warning?.capability).toBe("video");
     expect(warning?.message).toBeDefined();

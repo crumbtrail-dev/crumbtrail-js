@@ -16,6 +16,7 @@ import {
   type SessionComparison,
 } from "./types";
 import { divergencesToEvidence } from "./evidence-map";
+import { defaultSessionStore } from "../session-store";
 
 export class CompareError extends Error {
   constructor(message: string) {
@@ -55,30 +56,38 @@ function parseNdjsonEvents(content: string): BugEvent[] {
   return events;
 }
 
-function readEvents(sessionDir: string): BugEvent[] {
-  const cold = path.join(sessionDir, "events.ndjson.zst");
-  const plain = path.join(sessionDir, "events.ndjson");
+// Session artifacts are read through the SessionStore seam so a storage
+// decorator (the hosted cloud's at-rest envelope encryption) can open them.
+// stub-behavior.json is a harness-authored file that never goes through the
+// seam, so it stays on fs.
+async function readEvents(sessionDir: string): Promise<BugEvent[]> {
   const stub = path.join(sessionDir, "stub-behavior.json");
   let coldEvents: BugEvent[] | null = null;
   const withStubBehavior = (events: BugEvent[]): BugEvent[] => {
     if (!fs.existsSync(stub)) return events;
     return [...events, ...readStubBehaviorEvents(stub)];
   };
-  if (fs.existsSync(cold)) {
+  const coldRaw = await defaultSessionStore.readArtifact(
+    sessionDir,
+    "events.ndjson.zst",
+  );
+  if (coldRaw) {
     if (typeof zlib.zstdDecompressSync !== "function") {
       throw new CompareError(
         "Node.js >= 22.15.0 is required to read events.ndjson.zst",
       );
     }
-    coldEvents = rehydrateSignatureRefs(
+    coldEvents = await rehydrateSignatureRefs(
       sessionDir,
-      parseNdjsonEvents(
-        zlib.zstdDecompressSync(fs.readFileSync(cold)).toString("utf8"),
-      ),
+      parseNdjsonEvents(zlib.zstdDecompressSync(coldRaw).toString("utf8")),
     );
   }
-  if (fs.existsSync(plain)) {
-    const plainEvents = parseNdjsonEvents(fs.readFileSync(plain, "utf8"));
+  const plainRaw = await defaultSessionStore.readArtifact(
+    sessionDir,
+    "events.ndjson",
+  );
+  if (plainRaw) {
+    const plainEvents = parseNdjsonEvents(plainRaw.toString("utf-8"));
     if (!coldEvents || plainEvents.length > coldEvents.length)
       return withStubBehavior(plainEvents);
   }
@@ -87,13 +96,16 @@ function readEvents(sessionDir: string): BugEvent[] {
   throw new CompareError(`no events.ndjson(.zst) found in ${sessionDir}`);
 }
 
-function readSignatureDictionary(
+async function readSignatureDictionary(
   sessionDir: string,
-): Map<number, Record<string, unknown>> {
-  const filePath = path.join(sessionDir, "signatures.json");
-  if (!fs.existsSync(filePath)) return new Map();
+): Promise<Map<number, Record<string, unknown>>> {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const raw = await defaultSessionStore.readArtifact(
+      sessionDir,
+      "signatures.json",
+    );
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw.toString("utf-8")) as unknown;
     if (!isRecord(parsed) || !Array.isArray(parsed.entries)) return new Map();
     const byId = new Map<number, Record<string, unknown>>();
     for (const entry of parsed.entries) {
@@ -106,11 +118,11 @@ function readSignatureDictionary(
   }
 }
 
-function rehydrateSignatureRefs(
+async function rehydrateSignatureRefs(
   sessionDir: string,
   events: BugEvent[],
-): BugEvent[] {
-  const signatures = readSignatureDictionary(sessionDir);
+): Promise<BugEvent[]> {
+  const signatures = await readSignatureDictionary(sessionDir);
   if (signatures.size === 0) return events;
   return events.map((event) => {
     const d = isRecord(event.d) ? event.d : {};
@@ -196,12 +208,12 @@ function readStubBehaviorEvents(filePath: string): BugEvent[] {
   return events;
 }
 
-function readSessionId(sessionDir: string): string {
+async function readSessionId(sessionDir: string): Promise<string> {
   for (const name of ["index.json", "meta.json", "manifest.json"]) {
-    const filePath = path.join(sessionDir, name);
-    if (!fs.existsSync(filePath)) continue;
     try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+      const raw = await defaultSessionStore.readArtifact(sessionDir, name);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw.toString("utf-8")) as unknown;
       if (!isRecord(parsed)) continue;
       const nested = isRecord(parsed.session) ? parsed.session.id : undefined;
       const id = parsed.id ?? parsed.sessionId ?? nested;
@@ -227,11 +239,13 @@ function readSessionId(sessionDir: string): string {
   return path.basename(sessionDir);
 }
 
-function readSessionMeta(sessionDir: string): Record<string, unknown> {
-  const filePath = path.join(sessionDir, "meta.json");
-  if (!fs.existsSync(filePath)) return {};
+async function readSessionMeta(
+  sessionDir: string,
+): Promise<Record<string, unknown>> {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const raw = await defaultSessionStore.readArtifact(sessionDir, "meta.json");
+    if (!raw) return {};
+    const parsed = JSON.parse(raw.toString("utf-8")) as unknown;
     return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
@@ -537,10 +551,12 @@ function comparableEnvironment(
   return out;
 }
 
-function loadComparableSession(sessionDir: string): ComparableSession {
-  const events = readEvents(sessionDir);
+async function loadComparableSession(
+  sessionDir: string,
+): Promise<ComparableSession> {
+  const events = await readEvents(sessionDir);
   const steps = extractSteps(events);
-  const meta = readSessionMeta(sessionDir);
+  const meta = await readSessionMeta(sessionDir);
   const release = stringOrUndefined(
     meta.release ?? meta.releaseId ?? meta.version,
   );
@@ -549,7 +565,7 @@ function loadComparableSession(sessionDir: string): ComparableSession {
   );
   const environment = extractEnvironment(events);
   return {
-    sessionId: readSessionId(sessionDir),
+    sessionId: await readSessionId(sessionDir),
     dir: sessionDir,
     events,
     steps,
@@ -1032,8 +1048,8 @@ export async function compareSessions(
   bDir: string,
   options: CompareOptions = {},
 ): Promise<SessionComparison> {
-  const a = loadComparableSession(aDir);
-  const b = loadComparableSession(bDir);
+  const a = await loadComparableSession(aDir);
+  const b = await loadComparableSession(bDir);
   const rules = new Set<string>();
   const disabled = new Set(options.disableNoiseRules ?? []);
   const alignment = alignSteps(

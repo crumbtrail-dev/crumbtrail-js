@@ -1697,7 +1697,7 @@ describe("MCP Server", () => {
         sessionId: "sess-cp4-id",
       });
       expect(result.isError).toBeFalsy();
-      const expected = buildFixContext(path.join(tmpDir, "sess-cp4-id"), {
+      const expected = await buildFixContext(path.join(tmpDir, "sess-cp4-id"), {
         outputDir: tmpDir,
       });
       expect(text).toBe(JSON.stringify(expected, null, 2));

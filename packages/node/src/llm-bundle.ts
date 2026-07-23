@@ -19,6 +19,7 @@ import { groupDistinctBugs, type DistinctBug } from "./distinct-bugs";
 import { redactedNetworkBodySnippet } from "./network-body";
 import type { EvidenceCandidate } from "./evidence-index";
 import type { CausalConfidence } from "./causal-graph";
+import { defaultSessionStore } from "./session-store";
 
 export const BROWSER_REDACTION_POLICY =
   "crumbtrail.browser-redaction.v1" as const;
@@ -726,13 +727,19 @@ const IMPORTANT_EVENT_KINDS = new Set([
   "media.voice",
 ]);
 
-export function writeLlmBundle(input: WriteLlmBundleInput): LlmBundle {
+// Writes through the SessionStore seam, not fs: llm.md/llm.json are finalize-time
+// cold artifacts rendered from the same events as events.ndjson, so an embedder
+// decorating storage (at-rest encryption) has to see them.
+export async function writeLlmBundle(
+  input: WriteLlmBundleInput,
+): Promise<LlmBundle> {
   const bundle = buildLlmBundle(input);
   const markdown = renderLlmMarkdown(bundle);
 
-  fs.writeFileSync(path.join(input.sessionDir, "llm.md"), markdown);
-  fs.writeFileSync(
-    path.join(input.sessionDir, "llm.json"),
+  await defaultSessionStore.writeArtifact(input.sessionDir, "llm.md", markdown);
+  await defaultSessionStore.writeArtifact(
+    input.sessionDir,
+    "llm.json",
     `${JSON.stringify(bundle, null, 2)}\n`,
   );
 

@@ -47,15 +47,15 @@ export class InspectError extends Error {
   }
 }
 
-export function inspectSession(
+export async function inspectSession(
   sessionDirOrId: string,
   opts: InspectSessionOptions = {},
-): SessionInspection {
+): Promise<SessionInspection> {
   const sessionDir = resolveSessionDir(sessionDirOrId, opts);
-  const manifest = readJsonRecord(sessionDir, "manifest.json");
-  const index = readJsonRecord(sessionDir, "index.json");
+  const manifest = await readJsonRecord(sessionDir, "manifest.json");
+  const index = await readJsonRecord(sessionDir, "index.json");
   // llm.json is hot-plane; only the bundle's self-measured latency stamp is read from it.
-  const llmBundle = readJsonRecord(sessionDir, "llm.json");
+  const llmBundle = await readJsonRecord(sessionDir, "llm.json");
 
   if (!manifest && !index) {
     throw new InspectError(
@@ -85,6 +85,11 @@ export function inspectSession(
   const firstErrorEventAt = finiteNumber(llmBundle?.firstErrorEventAt);
   const detectToBundleMs = finiteNumber(llmBundle?.detectToBundleMs);
 
+  // Hoisted: both now read through the async store seam.
+  const candidateCount =
+    candidates?.length ?? (await countCandidateLines(sessionDir));
+  const artifacts = await collectArtifacts(sessionDir, manifest);
+
   return {
     id:
       safeString(session?.id) ??
@@ -96,14 +101,14 @@ export function inspectSession(
       finiteNumber(session?.eventCount) ?? finiteNumber(index?.evts) ?? 0,
     errorCount: errs?.length ?? errorMarkers?.length ?? 0,
     failedRequestCount: failedReqs?.length ?? failedMarkers?.length ?? 0,
-    candidateCount: candidates?.length ?? countCandidateLines(sessionDir),
+    candidateCount,
     truncated: Boolean((session?.truncated as unknown) ?? index?.truncated),
     source: manifest ? "manifest" : "index",
     // Keys omitted entirely when llm.json carries no latency stamp, so --json output
     // stays clean for sessions without error-class evidence.
     ...(firstErrorEventAt !== undefined ? { firstErrorEventAt } : {}),
     ...(detectToBundleMs !== undefined ? { detectToBundleMs } : {}),
-    artifacts: collectArtifacts(sessionDir, manifest),
+    artifacts,
   };
 }
 
@@ -143,17 +148,17 @@ function resolveSessionDir(
  * hot+cold artifact lists (so the output reflects the canonical layout) and falls back to a
  * directory listing when no manifest exists. Directories and the raw events.ndjson are excluded.
  */
-function collectArtifacts(
+async function collectArtifacts(
   sessionDir: string,
   manifest: Record<string, unknown> | undefined,
-): SessionInspectionArtifact[] {
+): Promise<SessionInspectionArtifact[]> {
   const seen = new Set<string>();
   const artifacts: SessionInspectionArtifact[] = [];
 
-  const add = (name: string) => {
+  const add = async (name: string): Promise<void> => {
     if (seen.has(name)) return;
     if (path.basename(name) === "events.ndjson") return; // never surface the raw cold log
-    const stat = defaultSessionStore.statArtifact(sessionDir, name);
+    const stat = await defaultSessionStore.statArtifact(sessionDir, name);
     if (!stat || stat.isDir) return;
     seen.add(name);
     artifacts.push({ name, bytes: stat.bytes });
@@ -173,22 +178,22 @@ function collectArtifacts(
           entry.exists === true &&
           typeof entry.path === "string"
         )
-          add(entry.path);
+          await add(entry.path);
       }
     }
   } else {
-    const names = defaultSessionStore.listArtifacts(sessionDir);
+    const names = await defaultSessionStore.listArtifacts(sessionDir);
     for (const name of names.sort()) {
-      add(name);
+      await add(name);
     }
   }
 
   return artifacts;
 }
 
-function countCandidateLines(sessionDir: string): number {
+async function countCandidateLines(sessionDir: string): Promise<number> {
   try {
-    const buf = defaultSessionStore.readArtifact(
+    const buf = await defaultSessionStore.readArtifact(
       sessionDir,
       "candidates.jsonl",
     );
@@ -201,12 +206,12 @@ function countCandidateLines(sessionDir: string): number {
   }
 }
 
-function readJsonRecord(
+async function readJsonRecord(
   sessionDir: string,
   name: string,
-): Record<string, unknown> | undefined {
+): Promise<Record<string, unknown> | undefined> {
   try {
-    const buf = defaultSessionStore.readArtifact(sessionDir, name);
+    const buf = await defaultSessionStore.readArtifact(sessionDir, name);
     if (!buf) return undefined;
     const parsed: unknown = JSON.parse(buf.toString("utf-8"));
     return isRecord(parsed) ? parsed : undefined;
