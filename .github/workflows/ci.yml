@@ -20,6 +20,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # build first: workspace typecheck resolves sibling packages' dist types.
       - run: pnpm build
+      - name: Verify installer SDK version floors
+        run: pnpm verify:sdk-version-floors
+      - name: Verify packed CLI installation contract
+        run: pnpm verify:fresh-install
       - name: Check generated topology and benchmark artifacts
         run: |
           pnpm --filter crumbtrail-topology-harness check:matrix

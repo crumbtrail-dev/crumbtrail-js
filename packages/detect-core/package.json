@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail-detect-core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Side-effect-free Crumbtrail project detection and injection planning.",
   "license": "MIT",
   "repository": {

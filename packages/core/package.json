@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail-core",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Capture the console, network, DOM and state around a bug and hand it to a coding agent as evidence. Zero-dependency browser SDK. See https://crumbtrail.ai",
   "license": "MIT",
   "repository": {

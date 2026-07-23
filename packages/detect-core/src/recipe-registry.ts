@@ -84,14 +84,14 @@ const NODE_KEY: KeyRef = {
  * which once left freshly wired services on stale 0.2.x installs when a
  * dist-tag/publish hiccup lagged. Pinning `^<floor>` guarantees the wizard never
  * wires a service to an SDK older than the one this CLI was built against.
- * Bump these alongside SDK releases (they mirror the workspace package versions
- * at publish time).
+ * `pnpm verify:sdk-version-floors` mechanically enforces that this record is
+ * exact for every recipe-managed SDK and equals each workspace manifest version.
  */
 export const SDK_VERSION_FLOORS: Record<string, string> = {
-  "crumbtrail-core": "0.5.0",
-  "crumbtrail-node": "0.7.0",
-  "crumbtrail-react-native": "0.2.3",
-  "crumbtrail-tauri": "0.2.3",
+  "crumbtrail-core": "0.6.0",
+  "crumbtrail-node": "0.9.0",
+  "crumbtrail-react-native": "0.3.0",
+  "crumbtrail-tauri": "0.3.0",
 };
 
 /** The install spec for a package: `pkg@^<floor>`, or the bare name when unknown. */

@@ -34,6 +34,7 @@ coverage/
 # Misc
 .context/
 *.tgz
+.release-artifacts/
 Business Climate/market-first-verdict.md
 
 # Tool / agent artifacts

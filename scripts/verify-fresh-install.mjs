@@ -12,6 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const coreRoot = path.join(repoRoot, "packages", "core");
 const nodeRoot = path.join(repoRoot, "packages", "node");
+const cliRoot = path.join(repoRoot, "packages", "cli");
 const timeoutMs = 10_000;
 const maxDiagnosticChars = 1_500;
 const authToken = "fresh-install-verifier-auth-token";
@@ -205,19 +206,51 @@ async function readPackedPackageJson(tarballPath, extractDir) {
   return readJsonFile(path.join(extractDir, "package", "package.json"));
 }
 
-async function assertPackedNodeDependency(nodeTarball, extractDir) {
+async function assertPackedNodeDependency(
+  nodeTarball,
+  extractDir,
+  expectedCoreRange,
+) {
   recordPhase("packed-manifest", "start");
   const packedPkg = await readPackedPackageJson(nodeTarball, extractDir);
-  if (packedPkg.dependencies?.["crumbtrail-core"] !== "^0.1.0") {
+  if (packedPkg.dependencies?.["crumbtrail-core"] !== expectedCoreRange) {
     throw new Error(
-      `packed crumbtrail-node must rewrite crumbtrail-core workspace dependency to ^0.1.0, got ${packedPkg.dependencies?.["crumbtrail-core"] ?? "missing"}`,
+      `packed crumbtrail-node must rewrite crumbtrail-core workspace dependency to ${expectedCoreRange}, got ${packedPkg.dependencies?.["crumbtrail-core"] ?? "missing"}`,
     );
   }
   if (packedPkg.bin?.["crumbtrail-server"] !== "./dist/cli.cjs")
     throw new Error("packed crumbtrail-node bin must expose ./dist/cli.cjs");
   if (!packedPkg.files?.includes("dist"))
     throw new Error("packed crumbtrail-node package files must include dist");
-  recordPhase("packed-manifest", "pass", "crumbtrail-core=^0.1.0");
+  recordPhase("packed-manifest", "pass", `crumbtrail-core=${expectedCoreRange}`);
+}
+
+async function assertPackedCliInstallSpecs(cliTarball, tempProjectDir, expectedSpecs) {
+  recordPhase("packed-cli-install-specs", "start");
+  await fs.writeFile(
+    path.join(tempProjectDir, "package.json"),
+    JSON.stringify({ private: true, type: "commonjs" }, null, 2),
+  );
+  await runCommand(
+    "packed-cli-install",
+    "npm",
+    ["i", `crumbtrail@file:${cliTarball}`, "--ignore-scripts"],
+    { cwd: tempProjectDir },
+  );
+  const probe = await runCommand(
+    "packed-cli-probe",
+    process.execPath,
+    [
+      "-e",
+      'const { sdkInstallSpec } = require("crumbtrail"); console.log(JSON.stringify([sdkInstallSpec("crumbtrail-core"), sdkInstallSpec("crumbtrail-node")]));',
+    ],
+    { cwd: tempProjectDir },
+  );
+  const emittedSpecs = JSON.parse(probe.stdout.trim());
+  if (JSON.stringify(emittedSpecs) !== JSON.stringify(expectedSpecs)) {
+    throw new Error(`packed crumbtrail emitted install specs ${JSON.stringify(emittedSpecs)}, expected ${JSON.stringify(expectedSpecs)}`);
+  }
+  recordPhase("packed-cli-install-specs", "pass", `specs=${emittedSpecs.join(",")}`);
 }
 
 async function installTempProject(tempProjectDir, coreTarball, nodeTarball) {
@@ -250,7 +283,10 @@ async function installTempProject(tempProjectDir, coreTarball, nodeTarball) {
   recordPhase("temp-install", "pass");
 }
 
-async function assertInstalledPackageMetadata(tempProjectDir) {
+async function assertInstalledPackageMetadata(
+  tempProjectDir,
+  expectedCoreVersion,
+) {
   recordPhase("installed-package-metadata", "start");
   const installedPkg = await readJsonFile(
     path.join(
@@ -260,9 +296,10 @@ async function assertInstalledPackageMetadata(tempProjectDir) {
       "package.json",
     ),
   );
-  if (installedPkg.dependencies?.["crumbtrail-core"] !== "^0.1.0") {
+  const expectedCoreRange = `^${expectedCoreVersion}`;
+  if (installedPkg.dependencies?.["crumbtrail-core"] !== expectedCoreRange) {
     throw new Error(
-      "installed crumbtrail-node must declare crumbtrail-core dependency as ^0.1.0",
+      `installed crumbtrail-node must declare crumbtrail-core dependency as ${expectedCoreRange}`,
     );
   }
   const installedCorePkg = await readJsonFile(
@@ -275,7 +312,7 @@ async function assertInstalledPackageMetadata(tempProjectDir) {
   );
   if (
     installedCorePkg.name !== "crumbtrail-core" ||
-    installedCorePkg.version !== "0.1.0"
+    installedCorePkg.version !== expectedCoreVersion
   ) {
     throw new Error("installed crumbtrail-core package metadata mismatch");
   }
@@ -417,6 +454,18 @@ async function assertSelfHostArtifacts(baseUrl, outputDir) {
         line: 10,
       },
     },
+    {
+      t: 1_150,
+      k: "ui.num",
+      d: {
+        region: "dl.totals",
+        items: [
+          { label: "Subtotal", value: 199, unit: "$" },
+          { label: "Tax (8.25%)", value: 16.42, unit: "$" },
+          { label: "Total", value: 199, unit: "$" },
+        ],
+      },
+    },
   ];
   const eventWrite = await postJson(baseUrl, "/api/events", {
     sessionId,
@@ -460,6 +509,23 @@ async function assertSelfHostArtifacts(baseUrl, outputDir) {
   );
   if (!candidates.includes("HTTP 500"))
     throw new Error("CANDIDATES.md did not describe the failed request");
+  const candidateRows = (await fs.readFile(
+    path.join(sessionDir, "candidates.jsonl"),
+    "utf8",
+  ))
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  if (
+    !candidateRows.some(
+      (candidate) => candidate.detector === "ui_arithmetic_mismatch",
+    )
+  ) {
+    throw new Error(
+      "installed crumbtrail-node did not derive the ui_arithmetic_mismatch signal",
+    );
+  }
 
   const list = await fetchJson(`${baseUrl}/api/sessions`, {
     headers: { "X-Crumbtrail-Auth": authToken },
@@ -573,10 +639,12 @@ async function main() {
     );
     const packDir = path.join(tmpRoot, "packed");
     const tempProjectDir = path.join(tmpRoot, "project");
+    const cliProjectDir = path.join(tmpRoot, "packed-cli-project");
     const staticDir = path.join(tmpRoot, "static");
     const outputDir = path.join(tmpRoot, "sessions");
     await fs.mkdir(packDir, { recursive: true });
     await fs.mkdir(tempProjectDir, { recursive: true });
+    await fs.mkdir(cliProjectDir, { recursive: true });
     await fs.mkdir(staticDir, { recursive: true });
     await fs.writeFile(
       path.join(staticDir, "index.html"),
@@ -584,6 +652,8 @@ async function main() {
     );
 
     await assertPackageMetadata();
+    const corePackage = await readJsonFile(path.join(coreRoot, "package.json"));
+    const expectedCoreVersion = corePackage.version;
     // core must be built first so node's build can bundle it in.
     await runCommand("package-build", "pnpm", [
       "--filter",
@@ -595,15 +665,27 @@ async function main() {
       "crumbtrail-node",
       "build",
     ]);
+    await runCommand("package-build", "pnpm", [
+      "--filter",
+      "crumbtrail",
+      "build",
+    ]);
 
     const coreTarball = await packPackage(coreRoot, packDir);
     const nodeTarball = await packPackage(nodeRoot, packDir);
+    const cliTarball = await packPackage(cliRoot, packDir);
     await assertPackedNodeDependency(
       nodeTarball,
       path.join(tmpRoot, "packed-node-manifest"),
+      `^${expectedCoreVersion}`,
     );
+    const nodePackage = await readJsonFile(path.join(nodeRoot, "package.json"));
+    await assertPackedCliInstallSpecs(cliTarball, cliProjectDir, [
+      `crumbtrail-core@^${expectedCoreVersion}`,
+      `crumbtrail-node@^${nodePackage.version}`,
+    ]);
     await installTempProject(tempProjectDir, coreTarball, nodeTarball);
-    await assertInstalledPackageMetadata(tempProjectDir);
+    await assertInstalledPackageMetadata(tempProjectDir, expectedCoreVersion);
 
     const binPath = await resolveInstalledBin(tempProjectDir);
     const port = await getFreePort();
@@ -621,7 +703,7 @@ async function main() {
 
     recordPhase("complete", "pass", `project=${tempProjectDir}`);
     console.log(
-      "CRUMBTRAIL_FRESH_INSTALL_PASS phases=package-metadata,package-build,package-pack,temp-install,installed-package-metadata,binary-resolution,binary-startup,health-readiness,self-host-artifact-proof,shutdown",
+      "CRUMBTRAIL_FRESH_INSTALL_PASS phases=package-metadata,package-build,package-pack,packed-cli-install-specs,temp-install,installed-package-metadata,binary-resolution,binary-startup,health-readiness,self-host-artifact-proof,shutdown",
     );
   } catch (err) {
     if (child) await shutdownServer(child).catch(() => undefined);

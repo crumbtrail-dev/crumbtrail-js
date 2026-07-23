@@ -1,7 +1,8 @@
 name: release
 
-# Publishes every package in packages/* to npm at its current version.
-# Manual by design: bump versions in a PR, merge, then run this.
+# Publishes public packages selected from changed package paths plus workspace
+# dependency propagation since the supplied base ref. The release runner packs
+# the entire set first, then skips only registry artifacts with matching SRI.
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +10,10 @@ on:
         description: "Pack only; do not publish"
         type: boolean
         default: true
+      base_ref:
+        description: "Required git ref for the release baseline (normally the prior release commit or tag)"
+        required: true
+        type: string
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -23,6 +28,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           # >=11.10 speaks OIDC. Pinned exactly: 11.13.0 is also the release that
@@ -38,20 +45,32 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # build first: workspace typecheck resolves sibling packages' dist types.
       - run: pnpm build
+      - run: pnpm verify:sdk-version-floors
+      - run: pnpm verify:fresh-install
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm test:release
 
-      - name: Publish
-        # --no-git-checks: the build writes dist/, which is gitignored but makes
-        # pnpm consider the tree dirty.
+      - name: Create release plan and publish selected packages
+        # pnpm pack creates actual .tgz artifacts and rewrites workspace:^ specs.
+        # pnpm publish is required for the same workspace-protocol correctness.
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            pnpm -r --filter './packages/*' exec npm pack --dry-run
+          if [ "$RELEASE_DRY_RUN" = "true" ]; then
+            pnpm release:plan -- --base-ref "$RELEASE_BASE_REF" --mode dry-run
           else
-            pnpm -r --filter './packages/*' publish --access public --no-git-checks
+            pnpm release:plan -- --base-ref "$RELEASE_BASE_REF" --mode publish
           fi
         env:
           NPM_CONFIG_PROVENANCE: true
+          RELEASE_BASE_REF: ${{ inputs.base_ref }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+      - name: Upload dry-run package artifacts
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-dry-run
+          path: .release-artifacts/
+          if-no-files-found: error
 
   publish-crate:
     runs-on: ubuntu-latest

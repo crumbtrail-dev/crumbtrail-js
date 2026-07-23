@@ -16,8 +16,11 @@
     "pack:local": "node scripts/pack-local.mjs",
     "verify:installers": "node scripts/verify-installers.mjs",
     "verify:fresh-install": "node scripts/verify-fresh-install.mjs",
+    "verify:sdk-version-floors": "node scripts/verify-sdk-version-floors.mjs",
     "verify:integration-docs": "pnpm --filter crumbtrail-node build && node scripts/verify-integration-docs.mjs",
-    "refresh:installer-fixtures": "node scripts/refresh-installer-fixtures.mjs"
+    "refresh:installer-fixtures": "node scripts/refresh-installer-fixtures.mjs",
+    "release:plan": "node scripts/release/run-release-plan.mjs",
+    "test:release": "vitest run --config scripts/release/vitest.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail-node",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Self-hosted Crumbtrail server, MCP evidence tools and Express middleware for capturing and diagnosing bugs. See https://crumbtrail.ai",
   "license": "MIT",
   "repository": {
