@@ -157,6 +157,7 @@ export interface CaptureGapEventData {
     | "uninstrumented_client"
     | "missing_session_id"
     | "capture_exception"
+    | "scan_budget_exceeded"
     | "window_miss"
     | "sampled_out"
     | "header_stripped";

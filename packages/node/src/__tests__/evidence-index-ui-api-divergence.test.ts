@@ -215,6 +215,54 @@ describe("buildEvidenceCandidates — ui_api_divergence", () => {
     ).toHaveLength(3);
   });
 
+  it("stays silent when the UI dollars equal an integer cents API field (108.00 vs 10800)", () => {
+    const events: BugEvent[] = [
+      netRes(1000, "r1", { total: 10800 }),
+      uiNum(1500, [{ label: "Total", value: 108.0, unit: "$" }]),
+    ];
+    expect(
+      buildEvidenceCandidates(events, { start: 1000 }).some(
+        (c) => c.detector === "ui_api_divergence",
+      ),
+    ).toBe(false);
+  });
+
+  it("stays silent for a round-dollar UI value against integer cents (25 vs 2500)", () => {
+    const events: BugEvent[] = [
+      netRes(1000, "r1", { total: 2500 }),
+      uiNum(1500, [{ label: "Total", value: 25 }]),
+    ];
+    expect(
+      buildEvidenceCandidates(events, { start: 1000 }).some(
+        (c) => c.detector === "ui_api_divergence",
+      ),
+    ).toBe(false);
+  });
+
+  it("still fires on a real divergence that is not a ×100 unit match (108.00 vs 108.75)", () => {
+    const events: BugEvent[] = [
+      netRes(1000, "r1", { total: 108.75 }),
+      uiNum(1500, [{ label: "Total", value: 108.0, unit: "$" }]),
+    ];
+    const cand = buildEvidenceCandidates(events, { start: 1000 }).find(
+      (c) => c.detector === "ui_api_divergence",
+    );
+    expect(cand).toBeDefined();
+    expect(cand!.anchor.message).toContain("108.75");
+  });
+
+  it("does not silence when the larger value is non-integer (1.08 vs 108.5)", () => {
+    const events: BugEvent[] = [
+      netRes(1000, "r1", { total: 108.5 }),
+      uiNum(1500, [{ label: "Total", value: 1.08, unit: "$" }]),
+    ];
+    const cand = buildEvidenceCandidates(events, { start: 1000 }).find(
+      (c) => c.detector === "ui_api_divergence",
+    );
+    expect(cand).toBeDefined();
+    expect(cand!.anchor.message).toContain("108.5");
+  });
+
   it("is inert when there are no ui.num events (existing sessions unaffected)", () => {
     const events: BugEvent[] = [netRes(1000, "r1", { total: 215.42 })];
     expect(

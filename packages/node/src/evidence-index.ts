@@ -1922,6 +1922,40 @@ function resolveDivergenceMatches(
 }
 
 /**
+ * Cents/dollars unit-equivalence guard. A pervasive API convention returns
+ * currency as integer minor units (cents) — `total: 10800` — while the same
+ * amount renders on screen in major units — `108.00`. The raw numbers differ
+ * by a factor of 100 yet describe the identical amount, so a naive comparison
+ * flags a false divergence. Treat the pair as equivalent (→ stay silent) when
+ * either side, multiplied by 100, lands within one cent of the other. The
+ * ×100 reading is only applied when the *larger* side is an integer, because
+ * real minor-unit fields are always whole numbers: this refuses to silence
+ * e.g. 1.08 vs 108.5, where neither reading is a clean cents value. The
+ * comparison runs in cents space, where one cent of tolerance equals 1.
+ *
+ * Accepted trade-off: a genuine display bug that is off by exactly ×100 (the
+ * UI shows 108.00 while the true amount really is 10800.00) is silenced by
+ * design. That coincidence is far rarer than the cents/dollars convention, and
+ * the detector's deny-biased posture prefers a miss to a false alarm.
+ */
+function isCentsDollarsEquivalent(uiValue: number, apiValue: number): boolean {
+  const centsTolerance = 1 + UI_FLOAT_SLACK; // one cent, in cents space
+  // API in cents, UI in dollars: apiValue ≈ uiValue × 100, apiValue integer.
+  if (
+    Number.isInteger(apiValue) &&
+    Math.abs(apiValue - uiValue * 100) <= centsTolerance
+  )
+    return true;
+  // UI in cents, API in dollars: uiValue ≈ apiValue × 100, uiValue integer.
+  if (
+    Number.isInteger(uiValue) &&
+    Math.abs(uiValue - apiValue * 100) <= centsTolerance
+  )
+    return true;
+  return false;
+}
+
+/**
  * C2: a labeled on-screen number differs by more than one cent from a
  * matching numeric field in a net.res body received since the last
  * navigation. Exact (case-normalized) field-name matches are preferred; a
@@ -1987,6 +2021,9 @@ function addUiApiDivergenceCandidates(
         continue;
       if (Math.abs(item.value - apiValue) <= UI_CENT_EPSILON + UI_FLOAT_SLACK)
         continue;
+      // A cents/dollars unit-convention match is not a divergence — the values
+      // describe the same amount under a ×100 minor-unit reading, so stay silent.
+      if (isCentsDollarsEquivalent(item.value, apiValue)) continue;
 
       byStem.set(stem, {
         detector: "ui_api_divergence",

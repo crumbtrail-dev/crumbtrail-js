@@ -5,8 +5,10 @@ import { DEFAULT_CONFIG, UI_NUM_EVENT_KIND } from "../types";
 import { REDACTED_VALUE } from "../redaction";
 import {
   parseNumericToken,
+  scanUiNumbers,
   uiNumbersCollector,
   UI_NUM_MAX_ITEMS,
+  UI_NUM_MAX_SCAN_ELEMENTS,
   UI_NUM_SETTLE_MS,
 } from "../collectors/ui-numbers";
 
@@ -65,6 +67,27 @@ describe("parseNumericToken", () => {
     expect(parseNumericToken("3 items in your cart")).toBeNull();
     expect(parseNumericToken("")).toBeNull();
     expect(parseNumericToken("free")).toBeNull();
+  });
+});
+
+describe("scanUiNumbers element budget", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("returns a region map for a DOM within budget", () => {
+    document.body.innerHTML = `<dl class="totals"><dt>Total</dt><dd>$9.99</dd></dl>`;
+    const regions = scanUiNumbers(document.body);
+    expect(regions).not.toBeNull();
+    expect(regions!.get("dl.totals")).toEqual([
+      { label: "Total", value: 9.99, unit: "$" },
+    ]);
+  });
+
+  it("returns null (over budget) when the element count exceeds the cap", () => {
+    // A tiny injected cap keeps the DOM small: three elements over a cap of 1.
+    document.body.innerHTML = `<dl class="totals"><dt>Total</dt><dd>$9.99</dd></dl>`;
+    expect(scanUiNumbers(document.body, undefined, 1)).toBeNull();
   });
 });
 
@@ -378,6 +401,41 @@ describe("uiNumbersCollector", () => {
     });
 
     // Disabled for the session: further mutations emit nothing.
+    document.body.innerHTML = `<dl class="totals"><dt>Total</dt><dd>$2.00</dd></dl>`;
+    await settle(bus);
+    expect(uiNumEvents(events)).toHaveLength(0);
+    expect(events.filter((event) => event.k === "capture_gap")).toHaveLength(1);
+  });
+
+  it("disables the collector with a scan_budget_exceeded gap when the DOM exceeds the scan budget", async () => {
+    document.body.innerHTML = `<dl class="totals"><dt>Total</dt><dd>$1.00</dd></dl>`;
+    const { events, bus, cleanup } = collect();
+    cleanups.push(cleanup);
+
+    // Simulate a page that blows the element budget without materializing tens
+    // of thousands of nodes: report an over-cap length for the scan's root
+    // query. scanUiNumbers bails before iterating, so only `.length` matters.
+    const spy = vi
+      .spyOn(document.body, "querySelectorAll")
+      .mockImplementation(
+        () =>
+          ({ length: UI_NUM_MAX_SCAN_ELEMENTS + 1 }) as unknown as ReturnType<
+            typeof document.body.querySelectorAll
+          >,
+      );
+    await settle(bus);
+    spy.mockRestore();
+
+    expect(uiNumEvents(events)).toHaveLength(0);
+    const gaps = events.filter((event) => event.k === "capture_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].d).toMatchObject({
+      surface: "browser",
+      reason: "scan_budget_exceeded",
+    });
+
+    // Disabled for the session: later mutations emit neither snapshots nor a
+    // second gap.
     document.body.innerHTML = `<dl class="totals"><dt>Total</dt><dd>$2.00</dd></dl>`;
     await settle(bus);
     expect(uiNumEvents(events)).toHaveLength(0);
