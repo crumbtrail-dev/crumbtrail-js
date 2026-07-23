@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import readline from "node:readline";
 import { execFileSync } from "node:child_process";
 import { redactTokenLikeString, redactUrl } from "crumbtrail-core";
 import {
@@ -278,8 +277,7 @@ export async function postProcess(
   sessionDir: string,
   whisperModel?: string,
 ): Promise<void> {
-  const eventsPath = path.join(sessionDir, "events.ndjson");
-  const events = fs.existsSync(eventsPath) ? await readEvents(eventsPath) : [];
+  const events = await readEvents(sessionDir);
   const truncation = readCaptureTruncationMarker(sessionDir);
 
   // Process audio transcription if audio.webm exists. Audio failures are non-fatal and
@@ -521,21 +519,25 @@ function isNavigationEvent(event: BugEvent): boolean {
   return event.k === "nav" || event.k === "navigation";
 }
 
-async function readEvents(eventsPath: string): Promise<BugEvent[]> {
-  const events: BugEvent[] = [];
-  const fileStream = fs.createReadStream(eventsPath, "utf-8");
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity,
-  });
+// Reads through the SessionStore seam rather than the filesystem: when a
+// decorator seals `events.ndjson` at rest (cloud EncryptedSessionStore), the
+// raw bytes are not NDJSON and only the store can recover them. The store
+// contract is buffer-based, so this parses a whole-file read instead of
+// streaming it line by line.
+async function readEvents(sessionDir: string): Promise<BugEvent[]> {
+  const raw = await defaultSessionStore.readArtifact(
+    sessionDir,
+    "events.ndjson",
+  );
+  if (raw === undefined) return [];
 
-  for await (const line of rl) {
-    if (line.trim()) {
-      try {
-        events.push(JSON.parse(line));
-      } catch {
-        // skip malformed lines
-      }
+  const events: BugEvent[] = [];
+  for (const line of raw.toString("utf-8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      // skip malformed lines
     }
   }
 
@@ -1506,7 +1508,7 @@ async function processAudio(
     const allEvents = [...baseEvents, ...txEvents].sort((a, b) => a.t - b.t);
 
     // Re-write events.ndjson with merged events.
-    writeEvents(sessionDir, allEvents);
+    await writeEvents(sessionDir, allEvents);
 
     return {
       events: allEvents,
@@ -1563,13 +1565,22 @@ async function readTranscriptEvents(
   return txEvents;
 }
 
-function writeEvents(sessionDir: string, events: BugEvent[]): void {
-  const eventsPath = path.join(sessionDir, "events.ndjson");
+// Writes through the SessionStore seam so a sealing decorator can re-seal the
+// merged log. Writing it with `fs` here would replace a sealed artifact with
+// plaintext and reopen the at-rest gap that finalize just closed.
+async function writeEvents(
+  sessionDir: string,
+  events: BugEvent[],
+): Promise<void> {
   const content =
     events.length > 0
       ? events.map((e) => JSON.stringify(e)).join("\n") + "\n"
       : "";
-  fs.writeFileSync(eventsPath, content);
+  await defaultSessionStore.writeArtifact(
+    sessionDir,
+    "events.ndjson",
+    content,
+  );
 }
 
 class AudioProcessingError extends Error {

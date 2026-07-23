@@ -324,7 +324,7 @@ export class SessionManager {
     const audio = await readAudioSummary(sessionDir);
     const warnings = [
       audioDegradationWarning(audio),
-      videoDegradationWarning(sessionDir),
+      await videoDegradationWarning(sessionDir),
     ].filter(
       (
         warning,
@@ -827,9 +827,12 @@ function audioDegradationWarning(
   };
 }
 
-function videoDegradationWarning(
+// Reads the event log through the SessionStore seam: under a sealing decorator
+// the raw file is not NDJSON, and parsing it with `fs` would silently drop the
+// degradation warning instead of reporting it.
+async function videoDegradationWarning(
   sessionDir: string,
-): { capability: "video"; code: string; message: string } | undefined {
+): Promise<{ capability: "video"; code: string; message: string } | undefined> {
   const recordingPath = path.join(sessionDir, "recording.webm");
   try {
     if (fs.existsSync(recordingPath) && fs.statSync(recordingPath).size > 0)
@@ -838,12 +841,14 @@ function videoDegradationWarning(
     return undefined;
   }
 
-  const eventsPath = path.join(sessionDir, "events.ndjson");
   try {
-    if (!fs.existsSync(eventsPath) || !fs.statSync(eventsPath).isFile())
-      return undefined;
+    const raw = await defaultSessionStore.readArtifact(
+      sessionDir,
+      "events.ndjson",
+    );
+    if (raw === undefined) return undefined;
 
-    for (const line of fs.readFileSync(eventsPath, "utf-8").split(/\r?\n/)) {
+    for (const line of raw.toString("utf-8").split(/\r?\n/)) {
       if (!line.trim()) continue;
       try {
         const event: unknown = JSON.parse(line);
