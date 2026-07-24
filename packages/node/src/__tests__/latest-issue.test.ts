@@ -8,7 +8,8 @@ import { resolveLatestIssue } from "../latest-issue";
  * Pins the shared latest-issue definition (backing BOTH the getLatestIssue MCP
  * tool and the `fix-context --latest` CLI flag):
  * - qualifies iff index.json exists (finalize signal) AND errs non-empty OR
- *   failedReqs non-empty OR any candidates.jsonl row with severity critical/high
+ *   failedReqs non-empty OR consoleErrors non-empty OR any candidates.jsonl row
+ *   with severity critical/high. networkErrors is deliberately not a clause.
  * - recency = index.end, fallback index.start, then meta.start; ties -> session
  *   id descending
  * - hot-plane reads only (never events.ndjson)
@@ -65,7 +66,9 @@ describe("resolveLatestIssue", () => {
   it("returns undefined for an empty store", async () => {
     expect(await resolveLatestIssue({ outputDir: tmpDir })).toBeUndefined();
     expect(
-      await resolveLatestIssue({ outputDir: path.join(tmpDir, "does-not-exist") }),
+      await resolveLatestIssue({
+        outputDir: path.join(tmpDir, "does-not-exist"),
+      }),
     ).toBeUndefined();
   });
 
@@ -109,6 +112,37 @@ describe("resolveLatestIssue", () => {
       sessionId: "ses_failed",
       dir,
     });
+  });
+
+  it("qualifies via index.consoleErrors non-empty, with no errs and no failedReqs", async () => {
+    // A console error moment carries no request id, so a db write near it grades `temporal`
+    // (medium/64) rather than `request` (high/88). Without this clause the session qualifies only
+    // when some unrelated write happens to sit nearby and reach `high`, which makes qualification
+    // depend on the write rather than on the error.
+    const dir = seed("ses_console_only", {
+      index: {
+        end: 5000,
+        consoleErrors: [{ t: 4000, lv: "err", msg: "checkout failed" }],
+      },
+      candidates: [{ id: "cand_0001", severity: "medium" }],
+    });
+    expect(await resolveLatestIssue({ outputDir: tmpDir })).toEqual({
+      sessionId: "ses_console_only",
+      dir,
+    });
+  });
+
+  it("does not qualify on index.networkErrors alone", async () => {
+    // networkErrors holds every net.err, including the routine cancellations post-process
+    // deliberately kept out of failedReqs. Qualifying on it would surface a fetch the user
+    // cancelled by navigating away as the latest issue.
+    seed("ses_net_only", {
+      index: {
+        end: 5000,
+        networkErrors: [{ t: 4000, url: "/x", reason: "AbortError" }],
+      },
+    });
+    expect(await resolveLatestIssue({ outputDir: tmpDir })).toBeUndefined();
   });
 
   it.each(["critical", "high"] as const)(
