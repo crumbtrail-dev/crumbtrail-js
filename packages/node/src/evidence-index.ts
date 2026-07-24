@@ -12,6 +12,11 @@ import { redactedNetworkBodySnippet } from "./network-body";
 import { attributeCandidates } from "./causal-graph";
 import { defaultSessionStore } from "./session-store";
 import type { CausalConfidence, CausalGraph } from "./causal-graph";
+import {
+  directorySourceMapLookup,
+  resolveFrame,
+  type SourceMap,
+} from "./source-map";
 
 export const CANDIDATE_SCHEMA_VERSION = 1 as const;
 const MAX_EVIDENCE_CANDIDATES = 200;
@@ -205,11 +210,19 @@ export interface EvidenceCandidate {
      */
     source?: string;
     /**
-     * Source location of the failing code as `file:line:col`, when the browser
-     * captured one. Minified unless the app ships readable builds; Crumbtrail
-     * does not resolve source maps today.
+     * Source location of the failing code as `file:line:col`, when one was
+     * captured. Resolved through the build's source map when a map is
+     * available, so this names a file in the repository rather than a bundler
+     * chunk; see `minifiedFrame` for what the runtime originally reported.
      */
     frame?: string;
+    /**
+     * The generated location `frame` was resolved FROM, set only when source
+     * map resolution actually replaced it. Kept so a reader can verify the
+     * mapping rather than trust it, and so a wrong map is detectable instead of
+     * silently sending someone to the wrong file.
+     */
+    minifiedFrame?: string;
     target?: TargetDescriptor;
   };
   /** Causal role assigned by the confidence-gated re-rank (CP3). Additive/optional. */
@@ -248,12 +261,53 @@ interface RequestInfo {
 // these are finalize-time cold-plane files, and an embedder that decorates the
 // store (the hosted cloud's at-rest envelope encryption) must see them, or they
 // stay plaintext on the volume while the rest of the session is sealed.
+/**
+ * Rewrites every candidate's `frame` to the original source location, keeping
+ * the generated one as `minifiedFrame`.
+ *
+ * Config gated on `CRUMBTRAIL_SOURCEMAP_DIR`, a directory of build output
+ * holding the `.map` files. Off by default: without it this is a no-op and the
+ * generated frame stands, which is the honest result rather than a silent
+ * half-resolution.
+ *
+ * Failure is always "leave the frame alone". A frame pointed at the wrong file
+ * is worse than a frame a reader knows is minified, so an unreadable, corrupt
+ * or non-covering map changes nothing.
+ */
+function resolveCandidateFrames(
+  candidates: EvidenceCandidate[],
+): EvidenceCandidate[] {
+  const dir = process.env.CRUMBTRAIL_SOURCEMAP_DIR?.trim();
+  if (!dir) return candidates;
+  if (!candidates.some((candidate) => candidate.anchor.frame)) {
+    return candidates;
+  }
+
+  const lookup = directorySourceMapLookup(dir);
+  // Shared across candidates: a session's failures usually sit in a handful of
+  // chunks, and parsing a production map is the expensive part.
+  const cache = new Map<string, SourceMap | undefined>();
+
+  return candidates.map((candidate) => {
+    const frame = candidate.anchor.frame;
+    if (!frame) return candidate;
+    const resolved = resolveFrame(frame, lookup, cache);
+    if (!resolved || resolved === frame) return candidate;
+    return {
+      ...candidate,
+      anchor: { ...candidate.anchor, frame: resolved, minifiedFrame: frame },
+    };
+  });
+}
+
 export async function writeEvidenceIndex(
   input: EvidenceIndexInput,
 ): Promise<EvidenceCandidate[]> {
   const events = normalizeEvidenceEvents(input.events);
   const index = withNavigationContext(events, input.index);
-  const candidates = buildEvidenceCandidates(events, index, input.causalGraph);
+  const candidates = resolveCandidateFrames(
+    buildEvidenceCandidates(events, index, input.causalGraph),
+  );
   const normalizedInput = { ...input, index };
   const windowsDir = path.join(input.sessionDir, "windows");
   fs.rmSync(windowsDir, { recursive: true, force: true });
@@ -2399,7 +2453,9 @@ function addUiApiDivergenceCandidates(
       const requestId = requestIdForEvent(response);
       for (const [name, value] of collectNumericFieldEntries(body)) {
         fieldEntries.push(
-          requestId === undefined ? { name, value } : { name, value, requestId },
+          requestId === undefined
+            ? { name, value }
+            : { name, value, requestId },
         );
       }
     }
@@ -2579,7 +2635,8 @@ function isNavigationEvent(event: BugEvent): boolean {
  * trailing digits so a bare `https://host/a.js` with no position never matches
  * and no half-location is reported as a code frame.
  */
-const STACK_FRAME_LOCATION = /((?:https?:\/\/|\/|[A-Za-z]:\\|\w)[^\s()]*?:\d+:\d+)/;
+const STACK_FRAME_LOCATION =
+  /((?:https?:\/\/|\/|[A-Za-z]:\\|\w)[^\s()]*?:\d+:\d+)/;
 
 /**
  * The `file:line:col` of the failing code, or undefined when the session never
@@ -2644,7 +2701,8 @@ function downrankTrackerBeacons(
       .filter((id): id is string => id !== undefined),
   );
   for (const draft of drafts) {
-    if (!isTrackerBeaconDraft(draft, beaconFailures, beaconRequestIds)) continue;
+    if (!isTrackerBeaconDraft(draft, beaconFailures, beaconRequestIds))
+      continue;
     draft.score = Math.min(draft.score, TRACKER_BEACON_SCORE);
     draft.severity = "low";
   }

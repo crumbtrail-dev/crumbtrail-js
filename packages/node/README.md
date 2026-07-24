@@ -53,6 +53,27 @@ CRUMBTRAIL_PACKAGE_RUNTIME_PASS cli=dist/cli.cjs ...
 | `--ai-model`            |                              unset | Parsed as an opaque model string.                                                                | Model override for the LLM produced opinion.                                                                                              |
 | `--ai-allow-auto-model` |                            `false` | Boolean flag.                                                                                    | Allow provider auto-model selection.                                                                                                      |
 
+### Source map resolution
+
+| Variable                    | Default | Purpose                                                                                                          |
+| --------------------------- | ------: | ---------------------------------------------------------------------------------------------------------------- |
+| `CRUMBTRAIL_SOURCEMAP_DIR`  |   unset | Directory of build output holding `.map` files. When set, a candidate's `anchor.frame` is resolved to the original source. |
+
+A frame captured on a minified build names a bundler chunk, such as
+`/_next/static/chunks/4526-abc.js:1:24891`. Point this at the directory your
+build wrote its `.map` files to and the frame is rewritten to the original
+`file:line:col`, with the generated location kept as `anchor.minifiedFrame` so
+the mapping can be checked rather than trusted.
+
+Maps are matched by the frame's basename, so `board.min.js` resolves against
+`board.min.js.map` in that directory. Only the basename is used and the read is
+confined to the directory, so a frame cannot reach files outside it.
+
+Resolution never guesses. A missing, corrupt, or non-covering map leaves the
+frame exactly as the runtime reported it, because a location pointing at the
+wrong file is worse than one a reader knows is minified. Index maps (a map with
+a `sections` array) are not resolved.
+
 Invalid config fails before the server binds and prints a bounded message like:
 
 ```text
