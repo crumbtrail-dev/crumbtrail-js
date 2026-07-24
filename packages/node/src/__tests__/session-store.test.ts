@@ -335,6 +335,7 @@ function delegateTo(inner: SessionStore): SessionStore {
   return {
     createSessionDir: (a) => inner.createSessionDir(a),
     appendEvents: (a, b, c) => inner.appendEvents(a, b, c),
+    appendRecordLines: (a, b, c) => inner.appendRecordLines(a, b, c),
     writeArtifact: (a, b, c) => inner.writeArtifact(a, b, c),
     writeBlob: (a, b, c) => inner.writeBlob(a, b, c),
     writeSessionArtifact: (a, b, c) => inner.writeSessionArtifact(a, b, c),

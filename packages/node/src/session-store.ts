@@ -53,6 +53,16 @@ export interface SessionStore {
     events: BugEvent[],
     opts?: AppendEventsOptions,
   ): Promise<AppendEventsResult>;
+  /**
+   * Append pre-serialized NDJSON records verbatim, bypassing event
+   * sanitization. Exists so a sealing decorator can append ciphertext without
+   * it being redacted; see the implementation note in FilesystemSessionStore.
+   */
+  appendRecordLines(
+    sessionDir: string,
+    records: string[],
+    opts?: AppendEventsOptions,
+  ): Promise<AppendEventsResult>;
   writeArtifact(
     sessionDir: string,
     name: string,
@@ -122,6 +132,36 @@ export class FilesystemSessionStore implements SessionStore {
     events: BugEvent[],
     opts: AppendEventsOptions = {},
   ): Promise<AppendEventsResult> {
+    // Returned, not awaited: appendRecordLines has no internal await either, so
+    // the whole serialize -> guard -> appendFile sequence still completes on the
+    // calling tick and keeps the single-writer property described above.
+    return this.appendRecordLines(
+      sessionDir,
+      events.map((event) => JSON.stringify(sanitizeEventForStorage(event))),
+      opts,
+    );
+  }
+
+  /**
+   * Append already-serialized NDJSON records verbatim.
+   *
+   * The seam a sealing decorator needs: ciphertext cannot travel through
+   * `appendEvents`, because `sanitizeEventForStorage` runs
+   * `redactTokenLikeString` over every string and a base64 envelope looks
+   * exactly like a credential to it, so the sealed bytes come back rewritten
+   * and unopenable. A decorator therefore sanitizes the PLAINTEXT event (so
+   * redaction still applies to real user data), seals the serialized line, and
+   * appends it here.
+   *
+   * Records must be single-line JSON with no trailing newline — this method
+   * writes the line terminator and never inspects the content.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async appendRecordLines(
+    sessionDir: string,
+    records: string[],
+    opts: AppendEventsOptions = {},
+  ): Promise<AppendEventsResult> {
     const filePath = path.join(sessionDir, "events.ndjson");
     const maxEventBytes = opts.maxEventBytes ?? DEFAULT_MAX_SESSION_EVENT_BYTES;
     const markerPath = path.join(sessionDir, CAPTURE_TRUNCATED_ARTIFACT);
@@ -132,7 +172,7 @@ export class FilesystemSessionStore implements SessionStore {
     if (fs.existsSync(markerPath)) {
       return {
         accepted: 0,
-        dropped: events.length,
+        dropped: records.length,
         truncated: true,
         bytesWritten: existingBytes,
       };
@@ -142,12 +182,11 @@ export class FilesystemSessionStore implements SessionStore {
     const acceptedLines: string[] = [];
     let dropped = 0;
 
-    for (let index = 0; index < events.length; index += 1) {
-      const event = sanitizeEventForStorage(events[index]);
-      const line = `${JSON.stringify(event)}\n`;
+    for (let index = 0; index < records.length; index += 1) {
+      const line = `${records[index]}\n`;
       const lineBytes = Buffer.byteLength(line, "utf-8");
       if (bytesWritten + lineBytes > maxEventBytes) {
-        dropped += events.length - index;
+        dropped += records.length - index;
         break;
       }
       acceptedLines.push(line);
@@ -584,6 +623,8 @@ export const defaultSessionStore: SessionStore = {
   createSessionDir: (sessionId) => activeStore.createSessionDir(sessionId),
   appendEvents: (sessionDir, events, opts) =>
     activeStore.appendEvents(sessionDir, events, opts),
+  appendRecordLines: (sessionDir, records, opts) =>
+    activeStore.appendRecordLines(sessionDir, records, opts),
   writeArtifact: (sessionDir, name, data) =>
     activeStore.writeArtifact(sessionDir, name, data),
   writeBlob: (sessionDir, name, data) =>
