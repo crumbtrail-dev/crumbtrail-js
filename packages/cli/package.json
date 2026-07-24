@@ -48,6 +48,7 @@
     "access": "public"
   },
   "scripts": {
+    "prepack": "node ../../scripts/assert-publish-safe.mjs",
     "prepublishOnly": "node ../../scripts/assert-publish-safe.mjs",
     "prebuild": "pnpm --filter crumbtrail-install-shared --filter crumbtrail-detect-core build",
     "build": "tsup",
