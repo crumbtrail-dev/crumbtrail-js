@@ -109,7 +109,15 @@ export interface DistinctBugRecurrence {
 // is a client-observed signal (network failures are observed by the browser even when the fault is
 // server-side; full-stack linkage already ties those together via requestId).
 const BACKEND_DETECTORS = new Set(["otel_span_error", "otel_log_error"]);
-const DB_DETECTORS = new Set(["db_mutation"]);
+// Evidence read off the db.diff plane. The per-request invariant detectors
+// belong here with the generic surfacing: their evidence IS a row image, so a
+// reader filtering a distinct bug's db evidence must see the detector that
+// named the bug, not only the writes around it.
+const DB_DETECTORS = new Set([
+  "db_mutation",
+  "db_field_divergence",
+  "duplicate_write",
+]);
 
 // Detectors whose failures share one root cause regardless of which page they fired on. A blocked
 // third-party fetch (classic "Unhandled rejection: Failed to fetch") repeats once per navigation, so

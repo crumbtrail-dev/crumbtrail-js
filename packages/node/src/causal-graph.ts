@@ -559,7 +559,13 @@ function nodeKindsForDetector(detector: string): Set<CausalNodeKind> {
     // (nodeKindFor only emits console.error for error-level), so a warning has no node of its own.
     // Falling through to the empty default keeps it isolated instead of stealing a real
     // console.error node from a genuine console_error candidate.
+    // db_field_divergence and duplicate_write read the same plane as
+    // db_mutation. Both anchor on a write they name explicitly, so when the
+    // requestId match in precedence step 1 does not apply they should still
+    // reach a db.write node rather than falling through to isolated.
     case "db_mutation":
+    case "db_field_divergence":
+    case "duplicate_write":
       return new Set(["db.write"]);
     default:
       if (detector.startsWith("otel_"))

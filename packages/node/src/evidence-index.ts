@@ -485,6 +485,8 @@ export function buildEvidenceCandidates(
   addOtelErrorCandidates(events, index, drafts);
   addBackendErrorCandidates(events, index, drafts);
   addDbDiffCandidates(events, index, drafts);
+  addDbFieldDivergenceCandidates(events, index, drafts);
+  addDuplicateWriteCandidates(events, index, drafts);
   const mutatingRequests = collectMutatingRequests(events);
   addDbDeltaMismatchCandidates(events, index, drafts, mutatingRequests);
   addIneffectiveInputCandidates(events, index, drafts, mutatingRequests);
@@ -1676,6 +1678,238 @@ function addDbDeltaMismatchCandidates(
         }),
         dedupeKey: `dbdelta:${request.requestId}:${pkValue}:${table}:${column}`,
       });
+    }
+  }
+}
+
+// ─── Per-request db.diff invariant detectors ──────────────────────────────
+//
+// Both read one request's whole `db.diff` set rather than a single diff, and
+// both are deliberately silent on ambiguity. They exist because the generic
+// `db_mutation` surfacing says only "a write happened", which cannot tell a
+// reader WHICH of eight writes in a failed request is the bug. These name the
+// bug from a property of the rows themselves, so they are scored above the
+// `db_mutation` ceiling of 88: a reader working the ranked list downward must
+// reach the named invariant violation before the generic plane dump.
+
+const DB_INVARIANT_SCORE = 90;
+
+/** Group a session's `db.diff` events by request id. Diffs with no request id are dropped: every rule here is per request, and an uncorrelated diff cannot join one. */
+function dbDiffsByRequest(events: BugEvent[]): Map<string, BugEvent[]> {
+  const byRequest = new Map<string, BugEvent[]>();
+  for (const event of events) {
+    if (event.k !== "db.diff") continue;
+    const requestId = safeText(event.d.requestId, 120);
+    if (!requestId) continue;
+    const list = byRequest.get(requestId) ?? [];
+    list.push(event);
+    byRequest.set(requestId, list);
+  }
+  return byRequest;
+}
+
+/** Field names that identify or timestamp a row rather than carry a value. Comparing them across two rows is meaningless: they are SUPPOSED to differ. */
+function isIdentityOrClockField(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower === "id" ||
+    lower.endsWith("_id") ||
+    lower.endsWith("id") ||
+    lower.endsWith("_at") ||
+    lower.endsWith("_on") ||
+    lower.includes("timestamp") ||
+    lower.includes("created") ||
+    lower.includes("updated") ||
+    lower === "uuid" ||
+    lower === "guid"
+  );
+}
+
+/** The pk values of a diff, as strings. */
+function pkValuesOf(event: BugEvent): string[] {
+  const pk = event.d.pk;
+  if (!isRecord(pk)) return [];
+  return Object.values(pk).map((value) => String(value));
+}
+
+/**
+ * Do these two rows reference each other?
+ *
+ * Linkage is a foreign key match: one row's after image or pk carries a value
+ * equal to the other row's primary key. This is the whole guard against
+ * comparing unrelated rows that happen to share a column name — two different
+ * customers' `orders` rows both have a `total_cents` and are supposed to
+ * differ.
+ */
+function rowsAreLinked(left: BugEvent, right: BugEvent): boolean {
+  const referencesPkOf = (from: BugEvent, target: BugEvent): boolean => {
+    const targetPks = new Set(pkValuesOf(target));
+    if (targetPks.size === 0) return false;
+    const after = from.d.after;
+    const candidates = [
+      ...pkValuesOf(from),
+      ...(isRecord(after) ? Object.values(after).map((v) => String(v)) : []),
+    ];
+    return candidates.some((value) => targetPks.has(value));
+  };
+  return referencesPkOf(left, right) || referencesPkOf(right, left);
+}
+
+/**
+ * db_field_divergence: two linked rows written by ONE request disagree about
+ * the same named value.
+ *
+ * The real case: a checkout wrote `products.price_cents=8900` and
+ * `order_items.price_cents=7900` in one request, the order_items row
+ * referencing the products row. Two prices for one product, written together,
+ * neither one wrong on its own. No existing detector reads the `db.diff` set
+ * as a set, so the candidate list was identical to the clean control's.
+ *
+ * Silent on ambiguity, by these guards:
+ *  - both rows must carry a record `after` image;
+ *  - the rows must be in DIFFERENT tables. Two rows of one table are siblings,
+ *    not a contradiction, and are supposed to hold different values;
+ *  - they must be linked by a foreign key match (see {@link rowsAreLinked});
+ *  - the shared field must name a value, not an identity or a clock;
+ *  - both values must be finite numbers. A string field disagreeing is not
+ *    reliably a contradiction — two rows can legitimately hold different
+ *    labels for one entity.
+ */
+function addDbFieldDivergenceCandidates(
+  events: BugEvent[],
+  index: EvidenceIndexInput["index"],
+  drafts: CandidateDraft[],
+): void {
+  for (const [requestId, diffs] of dbDiffsByRequest(events)) {
+    if (diffs.length < 2) continue;
+    for (let i = 0; i < diffs.length; i += 1) {
+      for (let j = i + 1; j < diffs.length; j += 1) {
+        const left = diffs[i];
+        const right = diffs[j];
+        const leftTable = safeText(left.d.table, 200);
+        const rightTable = safeText(right.d.table, 200);
+        if (!leftTable || !rightTable || leftTable === rightTable) continue;
+        const leftAfter = left.d.after;
+        const rightAfter = right.d.after;
+        if (!isRecord(leftAfter) || !isRecord(rightAfter)) continue;
+        if (!rowsAreLinked(left, right)) continue;
+
+        for (const field of Object.keys(leftAfter)) {
+          if (!(field in rightAfter)) continue;
+          if (isIdentityOrClockField(field)) continue;
+          const leftValue = toFiniteNumber(leftAfter[field]);
+          const rightValue = toFiniteNumber(rightAfter[field]);
+          if (leftValue === undefined || rightValue === undefined) continue;
+          if (leftValue === rightValue) continue;
+
+          const anchorEvent = left.t <= right.t ? left : right;
+          drafts.push({
+            detector: "db_field_divergence",
+            title: `Linked rows disagree on ${field}: ${leftTable}.${field}=${leftValue} but ${rightTable}.${field}=${rightValue} in one request`,
+            severity: "high",
+            score: DB_INVARIANT_SCORE,
+            confidence: "high",
+            anchor: removeUndefined({
+              t: anchorEvent.t,
+              offsetMs:
+                offsetForEvent(anchorEvent) ??
+                offsetFromStart(anchorEvent.t, index.start),
+              route: routeAt(index.navs ?? [], anchorEvent.t),
+              requestId,
+              message: `${leftTable}.${field}=${leftValue} vs ${rightTable}.${field}=${rightValue} (rows linked by id, written by request ${requestId})`,
+              source: normalizeDbEngine(anchorEvent.d.engine),
+            }),
+            // Table pair is ordered so the key does not depend on diff order.
+            dedupeKey: `dbfielddiv:${requestId}:${field}:${[leftTable, rightTable].sort().join("|")}`,
+          });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * The comparable content of an insert: its after image minus the primary key,
+ * canonicalized so two rows written in either key order compare equal.
+ *
+ * Returns undefined when nothing SUBSTANTIVE survives the pk drop. That guard
+ * is load bearing rather than defensive: the clean control run inserts two
+ * `shipments` rows whose after images are `{id: …}` alone, so they reduce to
+ * `{}` and a naive "identical inserts" rule fires on the control. A signature
+ * with no surviving value carries no evidence that the two rows are the same
+ * write twice, only that the capture recorded nothing about either.
+ */
+function insertSignature(event: BugEvent): string | undefined {
+  const after = event.d.after;
+  if (!isRecord(after)) return undefined;
+  const pkKeys = isRecord(event.d.pk) ? new Set(Object.keys(event.d.pk)) : null;
+  const entries = Object.entries(after)
+    .filter(([key]) => !pkKeys?.has(key))
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0) return undefined;
+  if (entries.every(([, value]) => isZeroOrEmpty(value))) return undefined;
+  return JSON.stringify(entries);
+}
+
+/**
+ * duplicate_write: one request inserted the same row into one table more than
+ * once.
+ *
+ * The real case: a retry storm with no idempotency key wrote two identical
+ * `coupon_redemptions` rows for one order under a single request id. Both rows
+ * are individually valid, so nothing else in the pipeline names them.
+ *
+ * Identity is the after image minus the primary key — a duplicate differs only
+ * by whatever the database generated. See {@link insertSignature} for the
+ * non trivial guard that keeps this silent on the clean control.
+ */
+function addDuplicateWriteCandidates(
+  events: BugEvent[],
+  index: EvidenceIndexInput["index"],
+  drafts: CandidateDraft[],
+): void {
+  for (const [requestId, diffs] of dbDiffsByRequest(events)) {
+    // table → signature → the inserts sharing it
+    const byTable = new Map<string, Map<string, BugEvent[]>>();
+    for (const event of diffs) {
+      if (safeText(event.d.op, 20) !== "insert") continue;
+      const table = safeText(event.d.table, 200);
+      if (!table) continue;
+      const signature = insertSignature(event);
+      if (signature === undefined) continue;
+      const signatures = byTable.get(table) ?? new Map<string, BugEvent[]>();
+      const group = signatures.get(signature) ?? [];
+      group.push(event);
+      signatures.set(signature, group);
+      byTable.set(table, signatures);
+    }
+
+    for (const [table, signatures] of byTable) {
+      for (const [signature, group] of signatures) {
+        if (group.length < 2) continue;
+        const anchorEvent = group.reduce((earliest, event) =>
+          event.t < earliest.t ? event : earliest,
+        );
+        const label = scrubText(table, 100) ?? "table";
+        drafts.push({
+          detector: "duplicate_write",
+          title: `Duplicate write: ${group.length} identical rows inserted into ${label} in one request`,
+          severity: "high",
+          score: DB_INVARIANT_SCORE,
+          confidence: "high",
+          anchor: removeUndefined({
+            t: anchorEvent.t,
+            offsetMs:
+              offsetForEvent(anchorEvent) ??
+              offsetFromStart(anchorEvent.t, index.start),
+            route: routeAt(index.navs ?? [], anchorEvent.t),
+            requestId,
+            message: `${group.length} inserts into ${table} in request ${requestId} share one after image once the primary key is dropped`,
+            source: normalizeDbEngine(anchorEvent.d.engine),
+          }),
+          dedupeKey: `dupwrite:${requestId}:${table}:${signature}`,
+        });
+      }
     }
   }
 }
