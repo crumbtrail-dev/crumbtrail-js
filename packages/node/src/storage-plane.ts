@@ -127,6 +127,121 @@ export async function writeColdEvidenceArtifacts(
   };
 }
 
+/**
+ * Rehydrates the cold event stream back into analyzable {@link BugEvent}s.
+ *
+ * This is the read inverse of {@link writeColdEvidenceArtifacts}: it
+ * decompresses `events.ndjson.zst` and expands each `d.el = { sigRef }` back
+ * into the `{ sig, path, tag }` shape the analyzer expects, using
+ * `signatures.json` as the dictionary. Without that expansion every element
+ * anchored detector sees a bare numeric ref and silently stops matching.
+ *
+ * Returns undefined when the session has no cold artifact (a live session that
+ * has not finalized yet, where `events.ndjson` is still the source of truth).
+ * Cold events are already sanitized, so callers must not re-sanitize them.
+ */
+export function readColdEvents(sessionDir: string): BugEvent[] | undefined {
+  const coldPath = path.join(sessionDir, COLD_EVENTS_ARTIFACT);
+  if (!fs.existsSync(coldPath)) return undefined;
+  if (typeof zlib.zstdDecompressSync !== "function") {
+    throw new Error(
+      "Crumbtrail cold storage requires Node.js >=22.15.0 for zstd decompression.",
+    );
+  }
+  const raw = zlib.zstdDecompressSync(fs.readFileSync(coldPath)).toString(
+    "utf-8",
+  );
+  const bySigRef = readSignatureDictionaryById(sessionDir);
+  const events: BugEvent[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // Match readEvents: skip malformed lines rather than fail the replay.
+    }
+    if (!isRecord(parsed)) continue;
+    events.push(rehydrateColdEvent(parsed as unknown as BugEvent, bySigRef));
+  }
+  return events;
+}
+
+/**
+ * Reports the cold plane exactly as it already exists on disk, so a re-analysis
+ * can rebuild the manifest without rewriting `events.ndjson.zst`.
+ *
+ * Byte counts come from the previous manifest when it is readable, because
+ * `sourceRawBytes` records the size of the original `events.ndjson`, which is
+ * gone by the time a session is cold and cannot be recovered from the
+ * compressed copy. Falling back to the on-disk sizes keeps the ratio honest
+ * (it reports cold-to-compressed) rather than inventing a figure.
+ */
+export function readColdEvidenceArtifacts(
+  sessionDir: string,
+): ColdEvidenceArtifacts | undefined {
+  const compressedBytes = existingFileBytes(
+    path.join(sessionDir, COLD_EVENTS_ARTIFACT),
+  );
+  if (compressedBytes === undefined) return undefined;
+  const signatures = readSignatureDictionary(sessionDir);
+  const manifest = readJsonRecord(path.join(sessionDir, MANIFEST_ARTIFACT));
+  const cold = isRecord(manifest?.cold) ? manifest.cold : undefined;
+  const compression = isRecord(cold?.compression) ? cold.compression : undefined;
+  const coldRawBytes = finiteNumber(compression?.coldRawBytes);
+  const sourceRawBytes = finiteNumber(compression?.sourceRawBytes);
+  return {
+    signatures,
+    coldRawBytes: coldRawBytes ?? compressedBytes,
+    sourceRawBytes: sourceRawBytes ?? coldRawBytes ?? compressedBytes,
+    compressedBytes,
+  };
+}
+
+function readSignatureDictionary(sessionDir: string): SignatureDictionary {
+  const parsed = readJsonRecord(path.join(sessionDir, SIGNATURES_ARTIFACT));
+  const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+  return {
+    schemaVersion: 1,
+    entries: entries.filter(
+      (entry): entry is SignatureDictionaryEntry =>
+        isRecord(entry) && finiteNumber(entry.id) !== undefined,
+    ),
+  };
+}
+
+function readSignatureDictionaryById(
+  sessionDir: string,
+): Map<number, SignatureDictionaryEntry> {
+  const byId = new Map<number, SignatureDictionaryEntry>();
+  for (const entry of readSignatureDictionary(sessionDir).entries)
+    byId.set(entry.id, entry);
+  return byId;
+}
+
+/** Expands `d.el = { sigRef }` back to the dictionary entry it points at. */
+function rehydrateColdEvent(
+  event: BugEvent,
+  bySigRef: Map<number, SignatureDictionaryEntry>,
+): BugEvent {
+  const data = isRecord(event.d) ? event.d : undefined;
+  if (!data) return event;
+  const el = isRecord(data.el) ? data.el : undefined;
+  const sigRef = finiteNumber(el?.sigRef);
+  if (sigRef === undefined) return event;
+  const entry = bySigRef.get(sigRef);
+  // A dangling ref means signatures.json is missing or truncated. Drop the
+  // placeholder rather than leave `{ sigRef }` behind, so detectors treat the
+  // element as absent instead of matching against a meaningless shape.
+  const rehydrated = entry
+    ? removeUndefined({ sig: entry.sig, path: entry.path, tag: entry.tag })
+    : undefined;
+  const nextData = { ...data };
+  if (rehydrated) nextData.el = rehydrated;
+  else delete nextData.el;
+  return { ...event, d: nextData } as BugEvent;
+}
+
 export async function writeTwoPlaneSessionArtifacts(
   input: WriteTwoPlaneSessionArtifactsInput,
 ): Promise<void> {

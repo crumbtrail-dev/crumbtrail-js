@@ -147,7 +147,11 @@ export type {
   SessionIndexLike,
   WriteLlmBundleInput,
 } from "./llm-bundle";
-export { postProcess } from "./post-process";
+export {
+  postProcess,
+  reanalyzeSession,
+  type ReanalyzeSessionResult,
+} from "./post-process";
 export { inspectSession, formatInspection, InspectError } from "./inspect";
 export type {
   SessionInspection,

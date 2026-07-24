@@ -21,6 +21,7 @@ import {
 import { runScan } from "./run-scan";
 import { runFixContext } from "./run-fix-context";
 import { runInspect } from "./run-inspect";
+import { runReanalyze } from "./run-reanalyze";
 import { runCompare } from "./run-compare";
 import { readPackageVersion } from "./version";
 
@@ -56,6 +57,7 @@ Commands:
   fix-context  Emit the ranked, correlated, LLM-ready fix-context bundle for a session
   inspect   Summarize a finalized session's manifest + artifacts (hot-plane only)
   compare   Compare two recorded sessions or releases
+  reanalyze Rebuild finalized sessions' artifacts with the current analyzer
   help      Show this help
 
 Global options:
@@ -127,6 +129,24 @@ Options:
 Examples:
   crumbtrail-server fix-context ses_123 --json
   crumbtrail-server fix-context --latest --follow --json`,
+  reanalyze: `crumbtrail-server reanalyze — rebuild finalized artifacts with the current analyzer
+
+Session artifacts are written once at finalize time, so a session analyzed by an
+older build keeps that build's output even after the analyzer improves. This
+replays the stored cold event stream through the current analyzer and rewrites
+the derived artifacts (index, candidates, bundle, manifest). The raw evidence
+(events.ndjson.zst, signatures.json) is read, never rewritten.
+
+Options:
+  <session>   Session id (resolved under the sessions dir) or a path to a session directory
+  --all       Reanalyze every finalized session under the sessions dir
+  --dry-run   List what would be reanalyzed without writing
+  --json      Emit the per-session report as JSON
+  --output    Sessions directory used to resolve a bare session id or --all
+
+Examples:
+  crumbtrail-server reanalyze ses_123
+  crumbtrail-server reanalyze --all --dry-run`,
   inspect: `crumbtrail-server inspect — summarize a finalized session's manifest + artifacts
 
 Reads hot-plane artifacts only (manifest.json, else index.json); never the raw event log.
@@ -259,6 +279,10 @@ export async function runCli(argv: string[]): Promise<number> {
 
   if (command === "compare") {
     return await runCompare(rest);
+  }
+
+  if (command === "reanalyze") {
+    return await runReanalyze(rest);
   }
 
   // command === 'serve'

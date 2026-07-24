@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import crypto from "node:crypto";
 import { FilesystemSessionStore } from "../session-store";
 
 /**
@@ -29,8 +28,19 @@ describe("FilesystemSessionStore.appendRecordLines", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  /**
+   * Fixed, not random. `redactTokenLikeString`'s catch-all pattern needs an
+   * unbroken 40+ character `[A-Za-z0-9_-]` run, and base64 of random bytes
+   * scatters `+` and `/` through the blob often enough to break that run — a
+   * random fixture makes the redaction assertion below fail intermittently.
+   * This payload is base64 that happens to contain no `+` or `/`, so the
+   * envelope is reliably credential-shaped.
+   */
+  const SEALED_PAYLOAD =
+    "YLd4shmDhRPq7D0b3Ud4eX0MUzO6m3K1xZHg6rF83PMZSqdUOAh4RfRF4Hov7APAgRQLYONJAmQpnEQRdQ==";
+
   function sealedLine(): { blob: string; line: string } {
-    const blob = `ctss1:${crypto.randomBytes(64).toString("base64")}`;
+    const blob = `ctss1:${SEALED_PAYLOAD}`;
     return { blob, line: JSON.stringify({ t: 1, k: "ct.sealed", d: { c: blob } }) };
   }
 
