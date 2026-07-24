@@ -164,3 +164,95 @@ describe("OTLP adapter redaction", () => {
     expect(JSON.stringify(event)).not.toContain("hunter2");
   });
 });
+
+describe("OTLP adapter span events", () => {
+  const spanWithEvents = (events: unknown[]) => ({
+    resourceSpans: [
+      {
+        resource: {
+          attributes: [{ key: "service.name", value: { stringValue: "api" } }],
+        },
+        scopeSpans: [
+          {
+            spans: [
+              {
+                name: "POST /alerts",
+                status: { code: 2 },
+                events,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  it("ingests a recorded exception span event", () => {
+    // recordException() is where a backend puts its stacktrace. Ingesting only
+    // span attributes discarded it at the adapter.
+    const [event] = convertOtlpTraceToEvents(
+      spanWithEvents([
+        {
+          name: "exception",
+          timeUnixNano: "1700000000000000000",
+          attributes: [
+            { key: "exception.type", value: { stringValue: "TypeError" } },
+            {
+              key: "exception.stacktrace",
+              value: {
+                stringValue:
+                  "TypeError: boom\n    at send (/srv/app/src/send.ts:44:9)",
+              },
+            },
+          ],
+        },
+      ]) as never,
+    );
+    const spanEvents = (event.d as Record<string, unknown>).spanEvents as Array<
+      Record<string, unknown>
+    >;
+    expect(spanEvents).toHaveLength(1);
+    expect(spanEvents[0].name).toBe("exception");
+    expect(
+      (spanEvents[0].attributes as Record<string, unknown>)[
+        "exception.stacktrace"
+      ],
+    ).toContain("/srv/app/src/send.ts:44:9");
+  });
+
+  it("redacts span event attributes through the same boundary as span attributes", () => {
+    // An exception message routinely quotes the value that caused the failure,
+    // so span events must not become the one un-scrubbed channel in OTLP.
+    const secret = "sk_fake_abcdefghijklmnopqrstuvwxyz1234567890";
+    const [event] = convertOtlpTraceToEvents(
+      spanWithEvents([
+        {
+          name: "exception",
+          attributes: [
+            { key: "exception.message", value: { stringValue: secret } },
+          ],
+        },
+      ]) as never,
+    );
+    const spanEvents = (event.d as Record<string, unknown>).spanEvents as Array<
+      Record<string, unknown>
+    >;
+    const attrs = spanEvents[0].attributes as Record<string, unknown>;
+    expect(JSON.stringify(attrs)).not.toContain(secret);
+  });
+
+  it("bounds how many span events a single span can carry", () => {
+    const many = Array.from({ length: 100 }, (_, index) => ({
+      name: `retry-${index}`,
+    }));
+    const [event] = convertOtlpTraceToEvents(spanWithEvents(many) as never);
+    const spanEvents = (event.d as Record<string, unknown>)
+      .spanEvents as unknown[];
+    expect(spanEvents.length).toBeLessThanOrEqual(32);
+  });
+
+  it("omits spanEvents entirely when a span has none", () => {
+    const [event] = convertOtlpTraceToEvents(spanWithEvents([]) as never);
+    expect((event.d as Record<string, unknown>).spanEvents).toBeUndefined();
+  });
+});

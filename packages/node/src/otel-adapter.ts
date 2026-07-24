@@ -5,6 +5,7 @@ import {
   redactValue,
   type BodyRedactionResult,
   type BugEvent,
+  type RedactionMetadata,
   type RedactionResult,
 } from "crumbtrail-core";
 import {
@@ -23,6 +24,12 @@ const STATUS_CODE_MAP: Record<number, string> = {
   2: "ERROR",
 };
 
+export interface OtlpSpanEvent {
+  timeUnixNano?: string | number;
+  name?: string;
+  attributes?: OtlpKeyValue[];
+}
+
 export interface OtlpSpan {
   traceId?: string;
   spanId?: string;
@@ -32,6 +39,13 @@ export interface OtlpSpan {
   startTimeUnixNano?: string | number;
   endTimeUnixNano?: string | number;
   attributes?: OtlpKeyValue[];
+  /**
+   * Where an SDK's `recordException()` lands: a span event named "exception"
+   * carrying exception.type, exception.message and exception.stacktrace. This
+   * is the ONLY place most backends report a stacktrace, so ingesting only
+   * span attributes left every backend error without a code location.
+   */
+  events?: OtlpSpanEvent[];
   status?: { code?: number; message?: string };
 }
 
@@ -78,6 +92,46 @@ function redactAttributes(
 function redactText(value: string, path: string): BodyRedactionResult {
   const result = redactNetworkTextBody(value, { path });
   return { ...result, body: result.body ?? REDACTED_VALUE };
+}
+
+/**
+ * Upper bound on span events carried per span. A retry loop or a chatty tracer
+ * can attach hundreds; the exception is what this exists for, and an unbounded
+ * array would bloat every session artifact for no diagnostic gain.
+ */
+const MAX_SPAN_EVENTS = 32;
+
+/**
+ * Converts span events, redacting their attributes through the SAME boundary as
+ * span attributes. This matters more here than elsewhere: an exception message
+ * and stacktrace routinely quote the values that caused the failure, so
+ * skipping redaction would make span events the one un-scrubbed channel in the
+ * OTLP path.
+ */
+function convertSpanEvents(events: OtlpSpanEvent[] | undefined): {
+  value: Array<Record<string, unknown>>;
+  metadata: Array<RedactionMetadata | undefined>;
+} {
+  const value: Array<Record<string, unknown>> = [];
+  const metadata: Array<RedactionMetadata | undefined> = [];
+
+  for (const spanEvent of (events ?? []).slice(0, MAX_SPAN_EVENTS)) {
+    const attrs = attributesToMap(spanEvent.attributes);
+    const redacted = redactAttributes(attrs, "otel.span.event.attributes");
+    metadata.push(redacted.metadata);
+
+    const entry: Record<string, unknown> = {};
+    const name =
+      typeof spanEvent.name === "string" ? spanEvent.name : undefined;
+    if (name) entry.name = name;
+    const t = unixNanoToMillis(spanEvent.timeUnixNano);
+    if (t !== undefined) entry.t = t;
+    if (Object.keys(redacted.value).length > 0)
+      entry.attributes = redacted.value;
+    if (Object.keys(entry).length > 0) value.push(entry);
+  }
+
+  return { value, metadata };
 }
 
 export function convertOtlpTraceToEvents(
@@ -131,10 +185,13 @@ export function convertOtlpTraceToEvents(
         if (Object.keys(redactedResourceAttrs.value).length > 0)
           d.resourceAttributes = redactedResourceAttrs.value;
         if (redactedStatusMessage) d.statusMessage = redactedStatusMessage.body;
+        const spanEvents = convertSpanEvents(span.events);
+        if (spanEvents.value.length > 0) d.spanEvents = spanEvents.value;
         const redaction = mergeRedactionMetadata(
           redactedResourceAttrs.metadata,
           redactedSpanAttrs.metadata,
           redactedStatusMessage?.metadata,
+          ...spanEvents.metadata,
         );
         if (redaction) d.redaction = redaction;
         if (startMs !== undefined && endMs !== undefined)

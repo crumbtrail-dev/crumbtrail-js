@@ -1117,6 +1117,27 @@ function otelCodeFrame(attributes: unknown): string | undefined {
   return codeFrameOf({ stk: stack.slice(0, MAX_STACK_CHARS) });
 }
 
+/**
+ * A code frame for a span, preferring its own attributes and falling back to a
+ * recorded exception span event.
+ *
+ * `recordException()` is how a backend normally reports a failure, and it puts
+ * exception.stacktrace on a span EVENT rather than on the span. Reading only
+ * span attributes therefore left the common case with no code location.
+ */
+function spanCodeFrame(d: Record<string, unknown>): string | undefined {
+  const fromAttributes = otelCodeFrame(d.attributes);
+  if (fromAttributes) return fromAttributes;
+
+  if (!Array.isArray(d.spanEvents)) return undefined;
+  for (const spanEvent of d.spanEvents) {
+    if (!isRecord(spanEvent)) continue;
+    const frame = otelCodeFrame(spanEvent.attributes);
+    if (frame) return frame;
+  }
+  return undefined;
+}
+
 function addConsoleWarningCandidates(
   events: BugEvent[],
   index: EvidenceIndexInput["index"],
@@ -1252,7 +1273,7 @@ function addOtelErrorCandidates(
           message:
             scrubText(event.d.statusMessage, 220) ?? scrubText(name, 220),
           source: service,
-          frame: otelCodeFrame(event.d.attributes),
+          frame: spanCodeFrame(event.d),
         }),
         dedupeKey: `otelspan:${safeText(event.d.spanId, 120) ?? event.t}:${event.d.statusCode ?? ""}:${status ?? ""}`,
       });

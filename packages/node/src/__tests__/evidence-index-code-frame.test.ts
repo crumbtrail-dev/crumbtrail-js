@@ -66,9 +66,7 @@ describe("buildEvidenceCandidates — code frame anchoring", () => {
   it("leaves the frame unset when a rejection carries no stack", () => {
     // Rejecting with a bare string gives the browser nothing to build a stack
     // from. The slot must stay honest rather than invent a location.
-    const events: BugEvent[] = [
-      { t: 1000, k: "rej", d: { msg: "nope" } },
-    ];
+    const events: BugEvent[] = [{ t: 1000, k: "rej", d: { msg: "nope" } }];
     const index = { start: 1000, errs: [{ t: 1000, msg: "nope" }] };
     const [candidate] = buildEvidenceCandidates(events, index).filter(
       (c) => c.detector === "unhandled_rejection",
@@ -183,6 +181,69 @@ describe("buildEvidenceCandidates — code frame anchoring", () => {
         (c) => c.detector === "otel_log_error",
       )?.anchor.frame,
     ).toBe("/srv/app/src/alerts/send.ts:44:9");
+  });
+
+  // recordException() puts the stacktrace on a span EVENT, not on the span, so
+  // reading only span attributes left the common backend case frameless.
+  it("anchors an OTel span error at its recorded exception span event", () => {
+    const events: BugEvent[] = [
+      {
+        t: 1000,
+        k: "backend.otel.span",
+        d: {
+          name: "POST /api/alerts",
+          statusCode: "ERROR",
+          serviceName: "job-engine",
+          spanEvents: [
+            {
+              name: "exception",
+              t: 1000,
+              attributes: {
+                "exception.type": "TypeError",
+                "exception.stacktrace":
+                  "TypeError: cannot read length\n    at dispatch (/srv/app/src/alerts/dispatch.ts:91:5)",
+              },
+            },
+          ],
+        },
+      },
+    ];
+    const [candidate] = buildEvidenceCandidates(events, { start: 1000 }).filter(
+      (c) => c.detector === "otel_span_error",
+    );
+    expect(candidate.anchor.frame).toBe("/srv/app/src/alerts/dispatch.ts:91:5");
+  });
+
+  it("prefers the span's own code attributes over a recorded exception", () => {
+    // The span's code.* attributes describe the span itself; an exception event
+    // may have been re-thrown from deeper. Attributes are the tighter answer.
+    const events: BugEvent[] = [
+      {
+        t: 1000,
+        k: "backend.otel.span",
+        d: {
+          name: "POST /api/alerts",
+          statusCode: "ERROR",
+          attributes: {
+            "code.file.path": "src/alerts/handler.ts",
+            "code.line.number": 12,
+          },
+          spanEvents: [
+            {
+              name: "exception",
+              attributes: {
+                "exception.stacktrace":
+                  "TypeError: x\n    at deep (/srv/app/src/other.ts:400:1)",
+              },
+            },
+          ],
+        },
+      },
+    ];
+    const [candidate] = buildEvidenceCandidates(events, { start: 1000 }).filter(
+      (c) => c.detector === "otel_span_error",
+    );
+    expect(candidate.anchor.frame).toBe("src/alerts/handler.ts:12");
   });
 
   it("leaves the OTel frame unset when a path carries no line number", () => {
