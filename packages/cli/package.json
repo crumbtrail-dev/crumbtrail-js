@@ -1,6 +1,6 @@
 {
   "name": "crumbtrail",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Set up Crumbtrail in one command: npx crumbtrail detects your framework, wires in the SDK, and verifies the first event. See https://crumbtrail.ai",
   "license": "MIT",
   "repository": {
