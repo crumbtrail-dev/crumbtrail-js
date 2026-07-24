@@ -537,12 +537,34 @@ export interface AttributableCandidate {
 }
 
 /**
+ * Detectors whose subject is a single database write: `db_mutation` surfaces
+ * the write plane, `db_field_divergence` and `duplicate_write` name a specific
+ * failure in one of those writes. All three anchor on the write itself, so they
+ * share a node family and can contend for the same node.
+ *
+ * `db_delta_mismatch` is deliberately absent: it is a named DB invariant, but it
+ * has never been in this table, and adding it here would change which node the
+ * temporal fallback hands it. That is a behavior change, not a comment fix, so
+ * it is left alone.
+ */
+const DB_WRITE_DETECTORS = new Set([
+  "db_mutation",
+  "db_field_divergence",
+  "duplicate_write",
+]);
+
+/**
  * Maps a candidate detector family onto the node kinds it can attribute to. Deterministic; used
  * only by the temporal fallback (precedence step 2) when a candidate has no requestId match.
  */
 function nodeKindsForDetector(detector: string): Set<CausalNodeKind> {
   if (detector.startsWith("backend_"))
     return new Set(["backend.error", "backend.req"]);
+  // db_field_divergence and duplicate_write read the same plane as db_mutation.
+  // Each anchors on a write it names explicitly, so when the requestId match in
+  // precedence step 1 does not apply they should still reach a db.write node
+  // rather than falling through to isolated.
+  if (DB_WRITE_DETECTORS.has(detector)) return new Set(["db.write"]);
   switch (detector) {
     case "http_error":
     case "app_2xx_failure":
@@ -559,19 +581,71 @@ function nodeKindsForDetector(detector: string): Set<CausalNodeKind> {
     // (nodeKindFor only emits console.error for error-level), so a warning has no node of its own.
     // Falling through to the empty default keeps it isolated instead of stealing a real
     // console.error node from a genuine console_error candidate.
-    // db_field_divergence and duplicate_write read the same plane as
-    // db_mutation. Both anchor on a write they name explicitly, so when the
-    // requestId match in precedence step 1 does not apply they should still
-    // reach a db.write node rather than falling through to isolated.
-    case "db_mutation":
-    case "db_field_divergence":
-    case "duplicate_write":
-      return new Set(["db.write"]);
     default:
       if (detector.startsWith("otel_"))
         return new Set(["otel.span", "otel.log"]);
       return new Set();
   }
+}
+
+/**
+ * Detectors that NAME a specific failure on a plane another detector merely
+ * surfaces, and that must therefore own a contended node ahead of that generic
+ * twin. Each entry has a twin it can tie with on the same event:
+ * `db_delta_mismatch`, `db_field_divergence` and `duplicate_write` against
+ * `db_mutation`; `otel_span_error` against `otel_db_activity`, which fires on
+ * the same span when a database span carries ERROR status.
+ *
+ * This is an ALLOWLIST, and omission is the safe answer, not an oversight. A
+ * detector left out takes the default in {@link ownershipPriority}, which is no
+ * ownership claim at all: contention involving it falls through to the id
+ * tie-break it used before this rule existed. Listing a detector is what changes
+ * behavior, so a new generic plane detector cannot quietly acquire priority over
+ * the named detectors it ties with — the same default-safe shape as
+ * {@link nodeKindsForDetector}, which falls an unknown detector to the empty set
+ * (isolated) rather than to a node it might not own.
+ */
+const NAMED_FAILURE_DETECTORS = new Set([
+  "db_delta_mismatch",
+  "db_field_divergence",
+  "duplicate_write",
+  "otel_span_error",
+]);
+
+/**
+ * Ordering key for node ownership, applied ONLY to candidates that tie on
+ * `anchor.t`. Two candidates can describe the SAME event — `db_mutation` says "a
+ * write happened on order_items", `db_field_divergence` says "that write
+ * disagrees with the products row it references". They anchor on the same
+ * timestamp and the same request, so they contend for one node, and the winner
+ * becomes the causal root while the loser is pushed down as a symptom of it.
+ *
+ * Resolving that by candidate id would decide it on a dedupe key prefix, which
+ * is an accident of naming. Resolve it by what the candidate says instead: the
+ * candidate that names the failure owns the node, and the generic surfacing of
+ * the same event falls back to another write or to isolated. A reader asking
+ * "what is wrong here" is answered by the named invariant violation, never by
+ * "a write happened".
+ *
+ * Scope, precisely: this is the THIRD sort key, under `anchor.t`. It arbitrates
+ * a tie at equal anchor time and nothing else — an earlier generic candidate
+ * still reaches a shared node before a later named one. That is sufficient here
+ * only because a named DB invariant anchors on the earliest event of the pair it
+ * compares, which is the same event `db_mutation` anchors on. A detector that
+ * anchored on the later event would still lose the node, and this key would not
+ * save it.
+ *
+ * Named versus named is not resolved: every listed detector returns 0, so two of
+ * them tying at the same anchor time still fall through to the id tie-break. No
+ * captured session reaches that case, and inventing an order between two named
+ * failures would be guessing.
+ *
+ * Lower sorts first, so 0 is the named failure and 1 the default.
+ */
+function ownershipPriority(detector: string | undefined): number {
+  return detector !== undefined && NAMED_FAILURE_DETECTORS.has(detector)
+    ? 0
+    : 1;
 }
 
 const CONFIDENCE_RANK: Record<CausalConfidence, number> = {
@@ -595,8 +669,9 @@ function weakerConfidence(
  *   1. requestId match: nearest |delta-t|, tie-break node id asc.
  *   2. temporal + compatible-kind fallback within CAUSAL_MAP_WINDOW_MS: nearest t, tie-break id asc.
  *   3. no match -> isolated.
- * One candidate per node: on contention the smaller anchor.t (then smaller candidate id) wins; the
- * loser falls back to (2)/(3).
+ * One candidate per node: on contention the smaller anchor.t wins, then the candidate that NAMES a
+ * failure over the generic surfacing of the same event (see {@link ownershipPriority}), then the
+ * smaller candidate id; the loser falls back to (2)/(3).
  *
  * Classification (over reverse adjacency effect->cause): nearest candidate-bearing ancestor = root;
  * this candidate becomes a symptom whose rootCauseId is that ancestor and whose attributionConfidence
@@ -632,11 +707,16 @@ function attributeCandidatesInternal(
   detectorById: (id: string) => string | undefined,
 ): Map<string, CandidateAttribution> {
   // --- 1. Map each candidate to at most one node (with per-node contention arbitration) --------
-  // Process candidates in a deterministic order (anchor.t asc, then id asc) so contention winners
-  // are stable regardless of input order.
+  // Process candidates in a deterministic order (anchor.t asc, then ownership priority, then id
+  // asc) so contention winners are stable regardless of input order. Since the incumbent always
+  // wins contention, processing order IS the arbitration rule: see ownershipPriority for why a
+  // named failure must reach a shared node before the generic plane surfacing of the same event.
   const sortedCandidates = [...candidates].sort(
     (a, b) =>
-      a.anchor.t - b.anchor.t || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      a.anchor.t - b.anchor.t ||
+      ownershipPriority(detectorById(a.id)) -
+        ownershipPriority(detectorById(b.id)) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
 
   // node id -> candidate id currently owning it.
@@ -701,8 +781,9 @@ function attributeCandidatesInternal(
         nodeToCandidate.set(reqNode.id, candidate.id);
         return reqNode.id;
       }
-      // Contention: smaller anchor.t, then smaller id wins. Since sortedCandidates is processed in
-      // (t, id) order, the incumbent always wins requestId contention; loser falls through.
+      // Contention: smaller anchor.t, then the named failure over the generic plane surfacing of
+      // the same event, then smaller id. Since sortedCandidates is processed in that order, the
+      // incumbent always wins requestId contention; the loser falls through.
     }
 
     // Precedence 2: temporal + compatible-kind fallback over still-unowned nodes.
@@ -742,6 +823,59 @@ function attributeCandidatesInternal(
     }
   }
 
+  const kindById = new Map<string, CausalNodeKind>(
+    nodes.map((node) => [node.id, node.kind]),
+  );
+
+  /**
+   * Is this end of a hop a database write?
+   *
+   * Two ways to be one, and both are needed. The node kind is the direct
+   * answer: a `db.write` node was built from a `db.diff` event. The owning
+   * candidate is the answer when the node kind lies about it: precedence 1 of
+   * the mapping matches on requestId alone and takes the node NEAREST in time
+   * regardless of kind, so a write whose `backend.req` node happens to be a
+   * millisecond closer than its own `db.write` node is attributed there. The
+   * candidate still describes a write; only the node it landed on does not say
+   * so. Reading the kind alone would clamp three writes of one request and
+   * leave the fourth at high confidence purely on that accident.
+   */
+  function isDbWriteEnd(nodeId: string): boolean {
+    if (kindById.get(nodeId) === "db.write") return true;
+    const candidateId = nodeToCandidate.get(nodeId);
+    if (candidateId === undefined) return false;
+    const detector = detectorById(candidateId);
+    return detector !== undefined && DB_WRITE_DETECTORS.has(detector);
+  }
+
+  /**
+   * How strongly one hop of the request spine supports a CAUSAL claim.
+   *
+   * The spine chains a request's nodes in time order, so consecutive writes in
+   * one request are joined by a high confidence `request` edge. That edge is a
+   * true statement about ordering and a weak one about causation: which write
+   * an application performs after which is a free choice of the code, and says
+   * nothing about which write is at fault. Reading it as high confidence
+   * causation makes every write the established cause of the next one, so the
+   * write a detector actually named is ranked behind every write that happened
+   * to precede it.
+   *
+   * The edge stays as captured — the two writes really are consecutive stages
+   * of one request. Only the causal claim drawn through it is weakened, to the
+   * same `low` tier the ranker treats as annotate only.
+   *
+   * Scope: this weakens EVERY write-to-write hop, not only spine hops, because
+   * `confByPair` keeps a confidence per (effect, cause) pair and discards
+   * `edge.kind`. The spine is the only rule that joins two db.write nodes
+   * today, so the two are the same set. Should a later rule draw a genuinely
+   * causal write-to-write edge, it would be clamped here as well and the
+   * predicate would have to read `edge.kind` to tell them apart.
+   */
+  function hopConfidence(effectId: string, causeId: string): CausalConfidence {
+    if (isDbWriteEnd(effectId) && isDbWriteEnd(causeId)) return "low";
+    return confByPair.get(JSON.stringify([effectId, causeId])) ?? "low";
+  }
+
   // --- 3. For each mapped candidate, walk ancestors to the nearest candidate-bearing ancestor ---
   // Returns { rootNodeId, weakestConfidence } or undefined when no candidate-bearing ancestor.
   function nearestCandidateAncestor(
@@ -766,8 +900,7 @@ function attributeCandidatesInternal(
         for (const causeId of causes) {
           if (visited.has(causeId)) continue;
           visited.add(causeId);
-          const hopConf =
-            confByPair.get(JSON.stringify([nodeId, causeId])) ?? "low";
+          const hopConf = hopConfidence(nodeId, causeId);
           const newPathConf =
             pathConf === undefined
               ? hopConf

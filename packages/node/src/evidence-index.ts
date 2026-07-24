@@ -580,12 +580,25 @@ export function buildEvidenceCandidates(
  * additive causal tag fields) but NEVER the emitted `score`. Uses `dedupeKey` as each draft's stable
  * identity. With no/empty graph, attribution is all-isolated and the baseline order is preserved.
  *
- * Gates (per attributionConfidence of the symptom→root link):
- *  - high symptom   → collapse: never eligible for ranked[0]; ordered strictly after ALL roots (kept
- *                     in output, appended to its root's causes).
- *  - medium symptom → demote+keep: ordered strictly after its own root, but may interleave with other
- *                     roots by score (still after all roots via tier, actually — see rankTier).
- *  - low symptom    → annotate only: order preserved; tags only.
+ * Gates (per attributionConfidence of the symptom→root link), applied by the tier sort:
+ *  - high symptom   → collapse: demoted tier, sorted after every root and every annotate-only draft
+ *                     (kept in output, appended to its root's causes).
+ *  - medium symptom → demote+keep: same demoted tier; within it, ordered by effective score.
+ *  - low symptom    → annotate only: not demoted, order preserved, tags only.
+ *
+ * TWO ordering rules, and they can disagree. The tier sort is the weaker one. `enforceRootBeforeSymptom`
+ * runs AFTER it and sweeps left to right: any draft found later than the symptom it causes is lifted to
+ * sit immediately before that symptom, INCLUDING across the tier boundary. So a demoted symptom that is
+ * itself the root of an undemoted draft is pulled back above unrelated roots, and is no longer barred
+ * from ranked[0].
+ *
+ * That is intended. "A root appears before its own symptom" is the more fundamental invariant: a list
+ * where a symptom precedes its cause is incoherent, while the tier partition only encodes how strongly
+ * a link was graded. The resulting order is also the one we want — the named failure sits directly under
+ * its actual root instead of at the bottom of the list on a technicality.
+ *
+ * So the only absolute guarantee here is root-before-symptom. A `high` symptom is NOT guaranteed to be
+ * ranked after all roots, nor to be excluded from ranked[0].
  *
  * The comparator produces a total, deterministic order derived solely from per-draft fields.
  */
@@ -652,7 +665,8 @@ function applyCausalRerank(
   }
 
   // Rank tier: roots + isolated (0) precede high/medium demoted symptoms (1). Low symptoms are NOT
-  // demoted (annotate-only) → tier 0, order preserved.
+  // demoted (annotate-only) → tier 0, order preserved. The tier holds only until
+  // enforceRootBeforeSymptom below, which may lift a tier-1 draft back across the boundary.
   const rankTier = (draft: CandidateDraft): number => {
     if (
       draft.causalRole === "symptom" &&
@@ -679,11 +693,10 @@ function applyCausalRerank(
     return a.dedupeKey.localeCompare(b.dedupeKey);
   });
 
-  // Guarantee: every demoted (high/medium) symptom orders strictly AFTER its root. The tier already
-  // pushes all demoted symptoms below all roots, so any symptom whose root is a tier-0 draft is
-  // satisfied. A symptom attributed to another (rare) demoted symptom is still after its root because
-  // the root precedes it in the same tier by effective score / tie-break; enforce explicitly for
-  // safety without disturbing determinism.
+  // Absolute guarantee: every symptom orders strictly AFTER its root. NOT a safety net over the tier
+  // sort — it overrides it. A tier-0 draft whose root is a tier-1 demoted symptom is only reachable by
+  // this pass, which lifts that root back across the tier boundary. See the header for why root-before-
+  // symptom outranks the tier partition when the two disagree.
   enforceRootBeforeSymptom(ordered, baselineRank);
 }
 

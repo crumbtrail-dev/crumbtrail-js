@@ -104,6 +104,29 @@ describe("attributeCandidates — classification", () => {
     expect(attribution.get("a")!.causalRole).toBe("isolated");
   });
 
+  /**
+   * Node ownership is an allowlist, and an unrecognised detector takes the UNPRIVILEGED default.
+   * A future detector that merely surfaces a plane must not silently outrank the named failures it
+   * ties with; the failure mode of forgetting to list a detector has to be "no claim", never "wins".
+   * Both candidates below anchor on the same instant and the same request, and the unknown one is
+   * given the alphabetically smaller id so it would win a bare id tie-break.
+   */
+  it("an unknown detector does not win node contention against a named failure", () => {
+    const graph = buildCausalGraph({ events: express500Events });
+    const attribution = attributeCandidates(
+      graph,
+      [
+        { id: "aaa_unknown", anchor: { t: 300, requestId: "req1" } },
+        { id: "zzz_named", anchor: { t: 300, requestId: "req1" } },
+      ],
+      (id) =>
+        id === "aaa_unknown" ? "future_plane_probe" : "db_field_divergence",
+    );
+
+    expect(attribution.get("zzz_named")!.causalRole).not.toBe("isolated");
+    expect(attribution.get("aaa_unknown")!.causalRole).toBe("isolated");
+  });
+
   it("is invariant to candidate input order (shuffle → identical mapping)", () => {
     const graph = buildCausalGraph({ events: express500Events });
     const cands = [
@@ -186,8 +209,78 @@ describe("buildEvidenceCandidates — gate behavior", () => {
     expect(feSymptom.attributionConfidence).toBe("high");
     // still present in output
     expect(feSymptom).toBeDefined();
-    // never ranked[0]
+    // Nothing causes this symptom, so no hoist reaches it and the tier holds: not ranked[0] here.
+    // That is a fact about THIS session, not a general guarantee — see the cross-tier hoist test.
     expect(candidates[0].id).not.toBe(feSymptom.id);
+  });
+
+  /**
+   * `enforceRootBeforeSymptom` runs after the tier sort and outranks it. A demoted (tier 1) symptom
+   * that is itself the root of an undemoted (tier 0) draft is lifted back across the tier boundary,
+   * which puts it above roots the tier partition alone would have kept ahead of it. Pinned here
+   * because it is the rule the header documents, and because a well-meaning "keep the tiers intact"
+   * change would silently bury the named failure again.
+   */
+  it("lifts a demoted symptom across the tier boundary to sit before the draft it causes", () => {
+    const write = (t: number, requestId: string, table: string): BugEvent => ({
+      t,
+      k: "db.diff",
+      d: {
+        engine: "postgres",
+        op: "insert",
+        table,
+        pk: { id: 1 },
+        after: { id: 1 },
+        requestId,
+      },
+    });
+    // One failing request whose error precedes its writes, so the spine hop error -> first write is
+    // a high-confidence `request` edge, while write -> write is clamped to low.
+    const events: BugEvent[] = [
+      {
+        t: 100,
+        k: "backend.req.error",
+        d: {
+          requestId: "req-checkout",
+          method: "POST",
+          route: "/checkout",
+          statusCode: 500,
+          error: { name: "Error", message: "pricing upstream failed" },
+        },
+      },
+      write(300, "req-checkout", "orders"),
+      write(310, "req-checkout", "order_items"),
+      // Unrelated background drain, far enough away to carry no error linkage at all.
+      write(90_000, "req-drain", "shipments"),
+    ];
+    const candidates = buildEvidenceCandidates(
+      events,
+      { start: 0 },
+      buildCausalGraph({ events }),
+    );
+
+    // Match on " on <table>" so `orders` cannot also match `order_items`.
+    const at = (table: string) =>
+      candidates.findIndex((c) => c.title.includes(` on ${table}`));
+    const get = (table: string) => candidates[at(table)];
+
+    const lifted = get("orders");
+    const caused = get("order_items");
+    const unrelatedRoot = get("shipments");
+
+    // Preconditions: `lifted` is a demoted (tier 1) high symptom; `caused` is annotate-only (tier 0)
+    // and names `lifted` as its root; `unrelatedRoot` is an undemoted root.
+    expect(lifted.causalRole).toBe("symptom");
+    expect(lifted.attributionConfidence).toBe("high");
+    expect(caused.causalRole).toBe("symptom");
+    expect(caused.attributionConfidence).toBe("low");
+    expect(caused.rootCauseId).toBe(lifted.id);
+    expect(unrelatedRoot.causalRole).toBe("root");
+
+    // The invariant that wins: a root is never listed after its own symptom.
+    expect(at("orders")).toBeLessThan(at("order_items"));
+    // And it wins ACROSS the tier boundary: the demoted symptom outranks an undemoted root.
+    expect(at("orders")).toBeLessThan(at("shipments"));
   });
 
   it("blast boost is bounded by MAX_BLAST_BOOST", () => {
@@ -195,6 +288,81 @@ describe("buildEvidenceCandidates — gate behavior", () => {
     // bound; cap is MAX_BLAST_BOOST.
     expect(CAUSAL_RANK_CONSTANTS.MAX_BLAST_BOOST).toBe(12);
     expect(CAUSAL_RANK_CONSTANTS.SEVERITY_WEIGHT.high).toBe(3);
+  });
+});
+
+describe("buildEvidenceCandidates — write-to-write causal claims are weakened", () => {
+  /**
+   * A request's spine chains its nodes in time order, so one write is joined to the next by a
+   * high-confidence `request` edge. Ordering, not causation — so the causal claim drawn through it is
+   * clamped to `low`.
+   *
+   * The clamp reads what the CANDIDATES are, not only what node kinds they landed on, and this
+   * fixture is why. `backend.req.end` shares the last write's millisecond, and the requestId match
+   * takes the nearest node regardless of kind, so that write is attributed to the `backend.req` node
+   * instead of its own `db.write`. Keyed on node kind alone, the first two writes are clamped and the
+   * third silently keeps `high` on the same bogus claim.
+   */
+  const write = (t: number, table: string): BugEvent => ({
+    t,
+    k: "db.diff",
+    d: {
+      engine: "postgres",
+      op: "insert",
+      table,
+      pk: { id: 1 },
+      after: { id: 1 },
+      requestId: "req1",
+    },
+  });
+  const events: BugEvent[] = [
+    {
+      t: 100,
+      k: "net.req",
+      d: {
+        id: "n1",
+        requestId: "req1",
+        url: "https://api.test/checkout",
+        m: "POST",
+      },
+    },
+    { t: 110, k: "backend.req.start", d: { requestId: "req1", route: "/c" } },
+    write(200, "orders"),
+    write(210, "order_items"),
+    write(220, "jobs"),
+    { t: 220, k: "backend.req.end", d: { requestId: "req1", route: "/c" } },
+  ];
+
+  it("clamps a write attributed to a non-db.write node just like its siblings", () => {
+    const candidates = buildEvidenceCandidates(
+      events,
+      { start: 0 },
+      buildCausalGraph({ events }),
+    );
+    // Match on " on <table>" so `orders` cannot also match `order_items`.
+    const byTable = (table: string) =>
+      candidates.find((c) => c.title.includes(` on ${table}`))!;
+
+    // Sibling writes, clamped through two db.write nodes.
+    expect(byTable("order_items").attributionConfidence).toBe("low");
+    // The one whose node kind hides that it is a write. Same claim, same clamp.
+    expect(byTable("jobs").causalRole).toBe("symptom");
+    expect(byTable("jobs").rootCauseId).toBe(byTable("order_items").id);
+    expect(byTable("jobs").attributionConfidence).toBe("low");
+  });
+
+  it("leaves the request's entry hop alone — that one is not write-to-write", () => {
+    const candidates = buildEvidenceCandidates(
+      events,
+      { start: 0 },
+      buildCausalGraph({ events }),
+    );
+    // orders is caused by the backend.req node that opened the request, which bears no candidate and
+    // is not a write. Nothing to weaken there.
+    expect(
+      candidates.find((c) => c.title.includes(" on orders"))!
+        .attributionConfidence,
+    ).toBe("high");
   });
 });
 
