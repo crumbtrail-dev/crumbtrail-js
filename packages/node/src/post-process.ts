@@ -76,6 +76,15 @@ interface ConsoleErrorIndexEntry {
   lv: string;
   msg: string;
   source?: string;
+  /**
+   * Stack synthesized by the console collector at `console.error` time (a
+   * `new Error().stack` taken inside the patched method). Kept because a
+   * framework that reports failures through `console.error` rather than
+   * throwing — React error boundaries being the common case — otherwise leaves
+   * the candidate with no code location at all, even though the collector
+   * captured one and shipped it.
+   */
+  stk?: string;
 }
 
 interface NetworkErrorIndexEntry {
@@ -662,6 +671,7 @@ function summarizeConsoleErrorEvent(
     lv: level,
     msg: message,
     source: safeString(event.d.source),
+    stk: safeStackString(event.d.stk),
   });
 }
 

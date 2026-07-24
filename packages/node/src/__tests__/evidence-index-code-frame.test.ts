@@ -75,4 +75,133 @@ describe("buildEvidenceCandidates — code frame anchoring", () => {
     );
     expect(candidate.anchor.frame).toBeUndefined();
   });
+
+  // A framework that reports failures through `console.error` instead of
+  // throwing — a React error boundary being the common case — used to produce a
+  // permanently frameless candidate, even though the console collector
+  // synthesizes a stack at call time and ships it. The stack reached the
+  // session index and was then dropped before candidates were built.
+  it("anchors a console error at the top frame of its synthesized stack", () => {
+    const events: BugEvent[] = [
+      { t: 1000, k: "con", d: { lv: "err", msg: "render failed" } },
+    ];
+    const index = {
+      start: 1000,
+      consoleErrors: [
+        {
+          t: 1000,
+          lv: "err",
+          msg: "render failed",
+          stk: "Error\n    at Board (https://app.example.test/assets/board-71c.js:220:14)\n    at renderWithHooks (https://app.example.test/assets/react-8de.js:11:2)",
+        },
+      ],
+    };
+    const [candidate] = buildEvidenceCandidates(events, index).filter(
+      (c) => c.detector === "console_error",
+    );
+    expect(candidate.anchor.frame).toBe(
+      "https://app.example.test/assets/board-71c.js:220:14",
+    );
+  });
+
+  it("leaves the console error frame unset when no stack was captured", () => {
+    const events: BugEvent[] = [
+      { t: 1000, k: "con", d: { lv: "err", msg: "render failed" } },
+    ];
+    const index = {
+      start: 1000,
+      consoleErrors: [{ t: 1000, lv: "err", msg: "render failed" }],
+    };
+    const [candidate] = buildEvidenceCandidates(events, index).filter(
+      (c) => c.detector === "console_error",
+    );
+    expect(candidate.anchor.frame).toBeUndefined();
+  });
+
+  it("anchors an OTel span error at its code.* attributes", () => {
+    const events: BugEvent[] = [
+      {
+        t: 1000,
+        k: "backend.otel.span",
+        d: {
+          name: "POST /api/alerts",
+          statusCode: "ERROR",
+          serviceName: "job-engine",
+          attributes: {
+            "code.file.path": "src/alerts/dispatch.ts",
+            "code.line.number": 91,
+            "code.column.number": 5,
+          },
+        },
+      },
+    ];
+    const [candidate] = buildEvidenceCandidates(events, { start: 1000 }).filter(
+      (c) => c.detector === "otel_span_error",
+    );
+    expect(candidate.anchor.frame).toBe("src/alerts/dispatch.ts:91:5");
+  });
+
+  it("accepts the older code.filepath spelling and the exception stacktrace", () => {
+    // Exporters in the field emit either semantic convention, and an SDK that
+    // records an exception may only set exception.stacktrace.
+    const legacy: BugEvent[] = [
+      {
+        t: 1000,
+        k: "backend.otel.span",
+        d: {
+          name: "POST /api/alerts",
+          statusCode: "ERROR",
+          attributes: {
+            "code.filepath": "src/alerts/dispatch.ts",
+            "code.lineno": 91,
+          },
+        },
+      },
+    ];
+    expect(
+      buildEvidenceCandidates(legacy, { start: 1000 }).find(
+        (c) => c.detector === "otel_span_error",
+      )?.anchor.frame,
+    ).toBe("src/alerts/dispatch.ts:91");
+
+    const recorded: BugEvent[] = [
+      {
+        t: 1000,
+        k: "backend.otel.log",
+        d: {
+          body: "dispatch failed",
+          severityText: "ERROR",
+          attributes: {
+            "exception.stacktrace":
+              "Error: dispatch failed\n    at send (/srv/app/src/alerts/send.ts:44:9)",
+          },
+        },
+      },
+    ];
+    expect(
+      buildEvidenceCandidates(recorded, { start: 1000 }).find(
+        (c) => c.detector === "otel_log_error",
+      )?.anchor.frame,
+    ).toBe("/srv/app/src/alerts/send.ts:44:9");
+  });
+
+  it("leaves the OTel frame unset when a path carries no line number", () => {
+    // A file with no line sends a reader to the top of a module, which is not a
+    // starting point. Half a location must not read as a captured one.
+    const events: BugEvent[] = [
+      {
+        t: 1000,
+        k: "backend.otel.span",
+        d: {
+          name: "POST /api/alerts",
+          statusCode: "ERROR",
+          attributes: { "code.file.path": "src/alerts/dispatch.ts" },
+        },
+      },
+    ];
+    const [candidate] = buildEvidenceCandidates(events, { start: 1000 }).filter(
+      (c) => c.detector === "otel_span_error",
+    );
+    expect(candidate.anchor.frame).toBeUndefined();
+  });
 });

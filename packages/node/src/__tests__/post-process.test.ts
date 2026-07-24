@@ -2931,6 +2931,44 @@ describe("searchable evidence index artifacts", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  // End to end guard for the console.error code location. The collector
+  // synthesizes a stack at call time; it has to survive the session index and
+  // reach the candidate anchor, or a framework that reports through the console
+  // instead of throwing produces a permanently frameless report.
+  it("carries a console.error stack through to the candidate anchor", async () => {
+    const events = [
+      { t: 1000, k: "nav", d: { to: "/board" } },
+      {
+        t: 1100,
+        k: "con",
+        d: {
+          lv: "error",
+          msg: "render failed",
+          stk: "Error\n    at Board (https://app.example.test/assets/board-71c.js:220:14)",
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(tmpDir, "events.ndjson"),
+      events.map((e) => JSON.stringify(e)).join("\n") + "\n",
+    );
+
+    await postProcess(tmpDir);
+
+    const index = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "index.json"), "utf-8"),
+    );
+    expect(index.consoleErrors?.[0]?.stk).toContain("board-71c.js:220:14");
+
+    const candidates = readNdjson(path.join(tmpDir, "candidates.jsonl"));
+    const consoleCandidate = candidates.find(
+      (c) => (c as { detector?: string }).detector === "console_error",
+    ) as { anchor?: { frame?: string } } | undefined;
+    expect(consoleCandidate?.anchor?.frame).toBe(
+      "https://app.example.test/assets/board-71c.js:220:14",
+    );
+  });
+
   it("writes deterministic candidate artifacts for application failures, redacted transcript, and windows", async () => {
     const events = [
       { t: 1000, k: "nav", d: { to: "/dashboard?token=secret" } },

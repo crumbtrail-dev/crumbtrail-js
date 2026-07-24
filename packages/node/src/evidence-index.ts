@@ -135,6 +135,8 @@ export interface EvidenceIndexInput {
       lv?: string;
       msg?: string;
       source?: string;
+      /** Stack synthesized by the console collector. See post-process.ts. */
+      stk?: string;
     }>;
     errs?: Array<{
       t: number;
@@ -394,6 +396,11 @@ export function buildEvidenceCandidates(
         route: routeAt(index.navs ?? [], entry.t),
         message: scrubText(entry.msg, 220),
         source: entry.source,
+        // The console collector synthesizes a stack at `console.error` time, so
+        // a framework that reports through the console instead of throwing
+        // still yields a code location. Without this the slot reads as a
+        // capture gap while the stack sits in the index unread.
+        frame: codeFrameOf({ stk: entry.stk }),
       }),
       // Key on content signature (message+route), not the volatile timestamp, so a component that
       // re-renders and re-logs the same console error collapses into one candidate (dedupeDrafts
@@ -1009,12 +1016,51 @@ function addTranscriptComplaintCandidates(
 const OTEL_SPAN_KIND = "backend.otel.span";
 const OTEL_LOG_KIND = "backend.otel.log";
 
+/** Upper bound on a stack scanned for a code frame. Deep async stacks are long. */
+const MAX_STACK_CHARS = 8000;
+
 function otelHttpStatus(attributes: unknown): number | undefined {
   if (!isRecord(attributes)) return undefined;
   return (
     finiteNumber(attributes["http.response.status_code"]) ??
     finiteNumber(attributes["http.status_code"])
   );
+}
+
+/**
+ * `file:line:col` for a backend signal, read from OTel attributes. Both the
+ * current (`code.file.path`) and the older (`code.filepath`) semantic
+ * convention names are accepted, since exporters in the field emit either.
+ *
+ * Falls back to `exception.stacktrace`, which is where a recorded exception
+ * puts its frames when the SDK sets it as an attribute rather than a span
+ * event. Returns undefined rather than a partial location, matching
+ * {@link codeFrameOf}: a path with no line is not a starting point.
+ */
+function otelCodeFrame(attributes: unknown): string | undefined {
+  if (!isRecord(attributes)) return undefined;
+  const file =
+    safeText(attributes["code.file.path"], 300) ??
+    safeText(attributes["code.filepath"], 300);
+  const line =
+    finiteNumber(attributes["code.line.number"]) ??
+    finiteNumber(attributes["code.lineno"]);
+  if (file && line !== undefined) {
+    const column =
+      finiteNumber(attributes["code.column.number"]) ??
+      finiteNumber(attributes["code.column"]);
+    return safeText(
+      `${file}:${line}${column !== undefined ? `:${column}` : ""}`,
+      300,
+    );
+  }
+  // Deliberately NOT safeText: it collapses runs of whitespace, which flattens
+  // a stack onto one line and leaves codeFrameOf nothing to split on (it skips
+  // the header line, so a flattened stack yields no frames at all). Pass the
+  // raw string, bounded, and let codeFrameOf truncate the location it returns.
+  const stack = attributes["exception.stacktrace"];
+  if (typeof stack !== "string") return undefined;
+  return codeFrameOf({ stk: stack.slice(0, MAX_STACK_CHARS) });
 }
 
 function addConsoleWarningCandidates(
@@ -1152,6 +1198,7 @@ function addOtelErrorCandidates(
           message:
             scrubText(event.d.statusMessage, 220) ?? scrubText(name, 220),
           source: service,
+          frame: otelCodeFrame(event.d.attributes),
         }),
         dedupeKey: `otelspan:${safeText(event.d.spanId, 120) ?? event.t}:${event.d.statusCode ?? ""}:${status ?? ""}`,
       });
@@ -1180,6 +1227,7 @@ function addOtelErrorCandidates(
           requestId: traceId,
           message: scrubText(event.d.body, 220),
           source: service,
+          frame: otelCodeFrame(event.d.attributes),
         }),
         dedupeKey: `otellog:${event.t}:${traceId ?? ""}:${body ?? ""}`,
       });
